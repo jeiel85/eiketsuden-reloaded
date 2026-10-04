@@ -1405,7 +1405,9 @@ impl EventWriter<'_, '_> {
     ///
     /// Why: the opening's records are part of the battle's setup that the story reads too, so
     /// without this an officer would gain the levels twice, or join before the camp and then
-    /// be taken off the field as the battle begins. The tests mirror that function's: the
+    /// once more by the outro, with a `retreat` by officer id that would also take a deployed
+    /// copy of them off the field ([`EventWriter::others_unit`] keeps only the enemy unit's
+    /// retreat). The tests mirror that function's: the
     /// army's officers' levels, and an allegiance that brings an officer in or sends one of
     /// the army away (the enemies the setup assigns are the battle's own).
     fn changed_before_camp(&self, instr: &Instr) -> bool {
@@ -1419,6 +1421,38 @@ impl EventWriter<'_, '_> {
             "set_country" => get("country") == 0 || in_army,
             "set_allegiance" => get("army") == 0 || in_army,
             _ => false,
+        }
+    }
+
+    /// A reference to the unit of `person` on a side other than the player's, which names that
+    /// unit alone: its tag, or `person_<number>` given to it when it has none.
+    ///
+    /// Input: an original person number. Output: the reference, or `None` when the person has
+    /// no such unit (or only one whose tag other units share).
+    ///
+    /// Why not the officer id: an officer who joins before the camp may be deployed as well,
+    /// and a `retreat` by officer id would take that player unit off the field too.
+    fn others_unit(&mut self, person: u16) -> Option<String> {
+        let i = self
+            .persons
+            .iter()
+            .zip(self.units.iter())
+            .position(|(&p, u)| p == person && u.side != Side::Player)?;
+        match self.units[i].tag.clone() {
+            Some(tag) => {
+                let shared = self
+                    .units
+                    .iter()
+                    .filter(|u| u.tag.as_deref() == Some(tag.as_str()))
+                    .count()
+                    > 1;
+                (!shared).then_some(tag)
+            }
+            None => {
+                let tag = format!("person_{person}");
+                self.units[i].tag = Some(tag.clone());
+                Some(tag)
+            }
         }
     }
 
@@ -1844,6 +1878,21 @@ impl EventWriter<'_, '_> {
                     );
                     if !self.notes.contains(&note) {
                         self.notes.push(note);
+                    }
+                    // One who joins still leaves the other side's ranks as the battle begins.
+                    let joins = match instr.mnemonic {
+                        "set_country" => get("country") == 0,
+                        "set_allegiance" => get("army") == 0,
+                        _ => false,
+                    };
+                    if joins {
+                        if let Some(target) = self.others_unit(get("person")) {
+                            flush(&mut scene, actions, self);
+                            let retreat = EventAction::Retreat { target };
+                            if !actions.contains(&retreat) {
+                                actions.push(retreat);
+                            }
+                        }
                     }
                 }
                 "add_levels" => {
@@ -4800,6 +4849,8 @@ item = "wine"
         };
         let c = convert_leg(&scene, 2, 0, "o");
         let actions: Vec<&EventAction> = c.battle.events.iter().flat_map(|e| &e.actions).collect();
+        // The officer who joins leaves the enemy's ranks by their unit's own tag (a deployed
+        // copy of them would match their officer id).
         assert_eq!(
             actions,
             [
@@ -4807,11 +4858,21 @@ item = "wine"
                     target: "boss".into(),
                     amount: 1
                 },
+                &EventAction::Retreat {
+                    target: "person_54".into()
+                },
                 &EventAction::Drama {
                     scene: "orig_o_2".into()
                 },
             ]
         );
+        let boss = c
+            .battle
+            .units
+            .iter()
+            .find(|u| u.officer.as_deref() == Some("boss"))
+            .unwrap();
+        assert_eq!(boss.tag.as_deref(), Some("person_54"));
         assert!(c.army.is_empty(), "{:?}", c.army);
         assert!(
             c.notes.iter().any(|n| n.contains("made before the camp")),
