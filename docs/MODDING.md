@@ -885,7 +885,7 @@ Actions:
 | `drama` | `scene` | Play a drama scene now. |
 | `spawn` | `group` | Bring every unit of that reinforcement group onto the map. |
 | `set_ai` | `target`, `ai`, `ai_target` (opt.), `ai_pos` (opt.) | Change a unit's behaviour. The new values replace the old ones completely: a left-out `ai_target` or `ai_pos` is **cleared**, not kept. Without `ai_pos`, `guard` guards the tile the unit stands on now, and `advance` has no destination, so the unit behaves as `aggressive`. |
-| `retreat` | `target` | Remove a unit without a fight (duel loser, escape). |
+| `retreat` | `target` | Remove a unit without a fight (duel loser, escape). A unit still waiting in its reinforcement group is taken out too: its group's `spawn` no longer brings it in. |
 | `level_up` | `target`, `amount` | Grant levels. |
 | `give_item` | `item` | Give the player an item (kept after a victory). |
 | `give_gold` | `amount` | Give the player gold (kept after a victory). |
@@ -1061,7 +1061,7 @@ caught; write free names in Korean or with a capital letter.
 | `@join <officer id>` | The officer joins the army (a banner is shown; nothing happens if already in the army), or comes back from `@away` (a quieter "{name} 복귀" banner instead of "{name} 합류!"). |
 | `@leave <officer id>` | The officer leaves; their equipment returns to the inventory (nothing happens if not in the army). |
 | `@away <officer id>` | The officer is away for a while: they stay in the army with their level, experience and equipment but cannot be deployed (the deploy screen marks them 부재). `@join` brings them back as they left. Nothing happens if not in the army. |
-| `@level <officer id> <levels>` | The officer of the army gains levels (at least 1, up to the level cap; one already above it keeps their level); HP, MP and known strategies follow from the level in the next battle. An officer of the pack who is not in the army yet has the levels kept and gets them when they join (the original raises officers of other armies before they come over); nothing happens for one the pack does not have. |
+| `@level <officer id> <levels>` | The officer of the army gains levels (at least 1, up to the level cap; one already above it keeps their level); HP, MP and known strategies follow from the level in the next battle. An officer of the pack who is not in the army yet has the levels kept (up to the level cap) and gets them when they join (the original raises officers of other armies before they come over); nothing happens for one the pack does not have. |
 | `@class <officer id> <class id>` | The officer of the army changes class (a story's change: no item or promotion level needed); equipment the new class family may not use goes back to the inventory; `fixed_class` does not stop it. An officer of the pack who is not in the army yet has the class kept and joins with it (and with any `@level` they were given); nothing happens for one the pack does not have. |
 | `@gold <±n>` | Give (or take) gold, clamped to `0..=gold_cap`. |
 | `@item <item id>` | Give one item. |

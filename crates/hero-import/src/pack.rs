@@ -2954,6 +2954,8 @@ fn convert_battles(
     let mut ended: BTreeSet<String> = BTreeSet::new();
     // The event scenes and army moves of each battle written (route variants share them).
     let mut scenes_of: BTreeMap<String, String> = BTreeMap::new();
+    // The battle each event scene written belongs to.
+    let mut scene_owner: BTreeMap<String, String> = BTreeMap::new();
     let mut army_moves_of: BTreeMap<String, String> = BTreeMap::new();
     for job in &jobs {
         let BattleJob {
@@ -3429,6 +3431,20 @@ fn convert_battles(
                 }
                 match scenes_of.get(named) {
                     None => {
+                        // Scene ids are `orig_<battle>_<record>[_<part>]`, so battles can share
+                        // one: `orig_X_2_2` is both the second part of record 2 of `X` and the
+                        // first of record 2 of its next leg `X_2`. The pack would not load
+                        // ("duplicate scene id"): the later battle is left out instead.
+                        if let Some((scene, other)) = shared_scene(&text, &scene_owner) {
+                            report.errors.push(format!(
+                                "{id}: its event scene `{scene}` has the id of a scene of \
+                                 `{other}`; left out"
+                            ));
+                            continue;
+                        }
+                        for scene in battles::scene_ids(&text) {
+                            scene_owner.insert(scene.to_string(), named.to_string());
+                        }
                         if !text.is_empty() {
                             let _ = write!(drama, "\n# ----- {} ({})\n{text}", r.id, r.source);
                             scenes += text.matches("\n== ").count();
@@ -4106,6 +4122,18 @@ fn original_equip(
         }
     }
     (equip, notes)
+}
+
+/// The first scene of `drama` whose id a scene written before already has, with the battle
+/// that scene belongs to.
+///
+/// Input: one battle's event scenes, and `owners` (scene id → battle) of those written so far.
+/// Output: the shared id and the battle that has it, or `None`.
+fn shared_scene<'a>(
+    drama: &'a str,
+    owners: &'a BTreeMap<String, String>,
+) -> Option<(&'a str, &'a str)> {
+    battles::scene_ids(drama).find_map(|s| owners.get(s).map(|o| (s, o.as_str())))
 }
 
 /// The persons scene `scene` brings into Liu Bei's army: `set_country` to country 0 and
@@ -5765,6 +5793,25 @@ mod tests {
              str = {strength}\nint = {int}\nlead = {lead}\n"
         ))
         .unwrap()
+    }
+
+    /// The second part of record 2 of `x` and the first of record 2 of its next leg `x_2` have
+    /// one id: the converter finds it before the pack fails to load on it.
+    #[test]
+    fn a_scene_id_two_battles_share_is_found() {
+        let first = "\n== orig_x_2\n@narr 하나\n@hide all\n\n== orig_x_2_2\n@narr 둘\n@hide all\n";
+        let next_leg = "\n== orig_x_2_2\n@narr 셋\n@hide all\n";
+        let mut owners = BTreeMap::new();
+        assert_eq!(shared_scene(first, &owners), None);
+        for scene in battles::scene_ids(first) {
+            owners.insert(scene.to_string(), "x".to_string());
+        }
+        assert_eq!(shared_scene(next_leg, &owners), Some(("orig_x_2_2", "x")));
+        assert_eq!(shared_scene("\n== orig_x_2_3\n@hide all\n", &owners), None);
+        // Together they are what the loader refuses.
+        let both = format!("{first}{next_leg}");
+        let err = hero_core::script::parse_drama("t", &both).unwrap_err();
+        assert!(err.msg.contains("duplicate scene id"), "{}", err.msg);
     }
 
     /// A battle per reading of the flags its setup and rosters depend on, only for flags the

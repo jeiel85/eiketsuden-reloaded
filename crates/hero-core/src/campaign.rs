@@ -718,8 +718,9 @@ impl CampaignState {
         if let Some(state) = self.officer_mut(officer) {
             state.level = state.level.saturating_add(levels).min(cap).max(state.level);
         } else if pack.officer(officer).is_some() {
+            // Capped: joining adds them up to the cap anyway, and the save stays small.
             let growth = self.pending_growth.entry(officer.to_string()).or_default();
-            growth.levels = growth.levels.saturating_add(levels);
+            growth.levels = growth.levels.saturating_add(levels).min(cap);
         } else {
             return Err(CampaignError::NotInArmy(officer.to_string()));
         }

@@ -291,6 +291,11 @@ fn queued_growth_is_capped_at_the_join_and_used_once() {
     let def = pack.officer("jian_yong").unwrap().clone();
     let mut state = CampaignState::new_game(&pack);
     state.add_levels(&pack, "jian_yong", 1000).unwrap();
+    // What is kept waiting is no more than the cap.
+    assert_eq!(
+        state.pending_growth["jian_yong"].levels,
+        pack.rules.level_cap
+    );
     state.join(&pack, "jian_yong").unwrap();
     assert_eq!(
         state.officer("jian_yong").unwrap().level,
