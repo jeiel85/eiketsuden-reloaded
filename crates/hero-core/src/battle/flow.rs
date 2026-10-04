@@ -398,7 +398,14 @@ impl BattleState {
             EventAction::Retreat { target } => {
                 let ids: Vec<UnitId> = self.matching(target).collect();
                 for id in ids {
-                    self.retreat(id, false, ev);
+                    // A unit still waiting in its reinforcement group is taken out too: once
+                    // an event has removed it (a duel's loser who was to come later), a `spawn`
+                    // must not bring it in. It was never on the map, so nothing is shown.
+                    if self.units[id].state == UnitState::Hidden {
+                        self.units[id].state = UnitState::Retreated;
+                    } else {
+                        self.retreat(id, false, ev);
+                    }
                 }
             }
             EventAction::LevelUp { target, amount } => {

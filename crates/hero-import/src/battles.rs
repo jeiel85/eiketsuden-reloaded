@@ -1265,6 +1265,16 @@ pub(crate) fn free_speaker(name: &str) -> String {
     }
 }
 
+/// The ids of the scenes of a drama (its `== id` lines).
+///
+/// Input: drama text as the converter writes it. Output: each scene id, in order.
+pub(crate) fn scene_ids(drama: &str) -> impl Iterator<Item = &str> {
+    drama
+        .lines()
+        .filter_map(|l| l.strip_prefix("== "))
+        .map(str::trim)
+}
+
 /// Remove scene `id` (its `== id` line and the lines up to the next scene) from a drama.
 pub(crate) fn remove_scene(drama: &mut String, id: &str) {
     let head = format!("\n== {id}\n");
@@ -1387,6 +1397,65 @@ fn person_tag(units: &mut [UnitSpawn], persons: &[u16], person: u16) -> Option<S
 }
 
 impl EventWriter<'_, '_> {
+    /// Whether `instr` of a chapter battle's opening is one `chapters::before_scene` already
+    /// writes for the camp before the battle (`@level`, `@join`, `@away`).
+    ///
+    /// Input: an instruction of an opening record (group 2). Output: `true` when the opening
+    /// must leave it out.
+    ///
+    /// Why: the opening's records are part of the battle's setup that the story reads too, so
+    /// without this an officer would gain the levels twice, or join before the camp and then
+    /// once more by the outro, with a `retreat` by officer id that would also take a deployed
+    /// copy of them off the field ([`EventWriter::others_unit`] keeps only the enemy unit's
+    /// retreat). The tests mirror that function's: the
+    /// army's officers' levels, and an allegiance that brings an officer in or sends one of
+    /// the army away (the enemies the setup assigns are the battle's own).
+    fn changed_before_camp(&self, instr: &Instr) -> bool {
+        let get = |name: &str| instr.operands.get(name).unwrap_or(0);
+        let Some(id) = self.names.officers.get(&get("person")) else {
+            return false;
+        };
+        let in_army = self.names.player_officers.contains(id);
+        match instr.mnemonic {
+            "add_levels" => in_army,
+            "set_country" => get("country") == 0 || in_army,
+            "set_allegiance" => get("army") == 0 || in_army,
+            _ => false,
+        }
+    }
+
+    /// A reference to the unit of `person` on a side other than the player's, which names that
+    /// unit alone: its tag, or `person_<number>` given to it when it has none.
+    ///
+    /// Input: an original person number. Output: the reference, or `None` when the person has
+    /// no such unit (or only one whose tag other units share).
+    ///
+    /// Why not the officer id: an officer who joins before the camp may be deployed as well,
+    /// and a `retreat` by officer id would take that player unit off the field too.
+    fn others_unit(&mut self, person: u16) -> Option<String> {
+        let i = self
+            .persons
+            .iter()
+            .zip(self.units.iter())
+            .position(|(&p, u)| p == person && u.side != Side::Player)?;
+        match self.units[i].tag.clone() {
+            Some(tag) => {
+                let shared = self
+                    .units
+                    .iter()
+                    .filter(|u| u.tag.as_deref() == Some(tag.as_str()))
+                    .count()
+                    > 1;
+                (!shared).then_some(tag)
+            }
+            None => {
+                let tag = format!("person_{person}");
+                self.units[i].tag = Some(tag.clone());
+                Some(tag)
+            }
+        }
+    }
+
     fn officer_ref(&self, person: u16) -> Option<String> {
         self.roles
             .iter()
@@ -1795,6 +1864,35 @@ impl EventWriter<'_, '_> {
                 "duel_end" => {
                     if duel.take().is_some() && scene.contains("@duel ") {
                         scene.push_str("@duel_end\n");
+                    }
+                }
+                // What the setup changes in the army before the camp (`chapters::before_scene`)
+                // is not changed again as the battle begins.
+                "add_levels" | "set_country" | "set_allegiance"
+                    if self.opening && self.chapter && self.changed_before_camp(instr) =>
+                {
+                    let note = format!(
+                        "record {record}: `{}` of {} is made before the camp",
+                        instr.mnemonic,
+                        self.names.person_label(get("person"))
+                    );
+                    if !self.notes.contains(&note) {
+                        self.notes.push(note);
+                    }
+                    // One who joins still leaves the other side's ranks as the battle begins.
+                    let joins = match instr.mnemonic {
+                        "set_country" => get("country") == 0,
+                        "set_allegiance" => get("army") == 0,
+                        _ => false,
+                    };
+                    if joins {
+                        if let Some(target) = self.others_unit(get("person")) {
+                            flush(&mut scene, actions, self);
+                            let retreat = EventAction::Retreat { target };
+                            if !actions.contains(&retreat) {
+                                actions.push(retreat);
+                            }
+                        }
                     }
                 }
                 "add_levels" => {
@@ -2640,6 +2738,7 @@ pub fn convert(
                 turn: 1,
                 side: Side::Player,
             },
+            None,
             actions,
             guarded,
         ));
@@ -2738,30 +2837,25 @@ pub fn convert(
             }
             let mut actions = Vec::new();
             let end = writer.script(r, &rec.code, &mut actions, true);
-            let branches = std::mem::take(&mut writer.branches);
-            let parts = std::iter::once(Branch {
-                when: Vec::new(),
-                unless: Vec::new(),
-                actions,
-                end,
-                at: None,
-            })
-            .chain(branches);
-            for part in parts {
-                let mut actions = part.actions;
-                actions.extend(moves_on(&mut writer, i, phase.parallel, part.end));
-                if actions.is_empty() {
-                    continue;
+            let mut branches = std::mem::take(&mut writer.branches);
+            // The battle moves on after the record's last action: a part that runs the record
+            // to its end (the record itself, what runs while a guarded part's flags do not hold)
+            // or ends it on its own moves it on; a guarded part the record goes on after does
+            // not (it would move the battle to the next stage before the rest is told, and the
+            // events of this stage after it would not fire).
+            actions.extend(moves_on(&mut writer, i, phase.parallel, end));
+            for part in &mut branches {
+                if part.end != ScriptEnd::Done || !part.unless.is_empty() {
+                    part.actions
+                        .extend(moves_on(&mut writer, i, phase.parallel, part.end));
                 }
-                events.push(EventDef {
-                    trigger: trigger.clone(),
-                    once: true,
-                    stage: staged.then_some(stage),
-                    when: part.when,
-                    unless: part.unless,
-                    actions,
-                });
             }
+            events.extend(events_in_order(
+                &trigger,
+                staged.then_some(stage),
+                actions,
+                branches,
+            ));
         }
     }
     let drama = std::mem::take(&mut writer.drama);
@@ -2853,34 +2947,51 @@ pub fn convert(
     })
 }
 
-/// The events of a script that fire on `trigger` (once, in no stage): what the script does
+/// The events of a script that fire on `trigger` (once, at `stage`): what the script does
 /// whatever the flags say (`actions`) and its parts guarded by flags (`branches`), in the order
 /// the script reaches them. A guarded part sits where the script met it, so the unconditional
 /// actions around it become events of their own: events fire in the order they are defined, and
 /// a line that follows the guarded one must not be told before it. (Jincang's opening: the
 /// defender, then Pang Tong or Zhao Yun by the route, then Jiang Wei.)
+///
+/// The parts without a place of their own (`at: None`: a test inside a guarded part, which is
+/// written before that part, and what runs while a part's flags do not hold, written after it)
+/// go with the next part that has one, or at the end.
 fn events_in_order(
     trigger: &Trigger,
+    stage: Option<u32>,
     actions: Vec<EventAction>,
     branches: Vec<Branch>,
 ) -> Vec<EventDef> {
     let event = |when: Vec<FlagCond>, unless: Vec<FlagCond>, actions: Vec<EventAction>| EventDef {
         trigger: trigger.clone(),
         once: true,
-        stage: None,
+        stage,
         when,
         unless,
         actions,
     };
     let mut out = Vec::new();
     let mut start = 0;
+    let mut waiting: Vec<Branch> = Vec::new();
     for part in branches {
-        if let Some(at) = part.at.filter(|&at| at > start && at <= actions.len()) {
+        let Some(at) = part.at else {
+            waiting.push(part);
+            continue;
+        };
+        if at > start && at <= actions.len() {
             out.push(event(Vec::new(), Vec::new(), actions[start..at].to_vec()));
             start = at;
         }
-        if !part.actions.is_empty() {
-            out.push(event(part.when, part.unless, part.actions));
+        for p in waiting.drain(..).chain([part]) {
+            if !p.actions.is_empty() {
+                out.push(event(p.when, p.unless, p.actions));
+            }
+        }
+    }
+    for p in waiting {
+        if !p.actions.is_empty() {
+            out.push(event(p.when, p.unless, p.actions));
         }
     }
     if start < actions.len() {
@@ -3854,6 +3965,64 @@ item = "wine"
         );
     }
 
+    /// A record's part guarded by a battle flag is told where the script tells it, between the
+    /// lines before and after it, and the battle moves to the next stage only after all of it
+    /// (moved on first, the guarded part of the stage it left would not fire).
+    #[test]
+    fn a_guarded_part_of_a_record_is_told_in_its_place_before_the_stage_moves_on() {
+        let mut scene = scene();
+        // Record 9 says one more line unless flag 91 is set, which record 7 sets.
+        let code = &mut scene.blocks[1].records[9].code;
+        code.insert(2, guard(1, vec![], vec![91]));
+        code.insert(3, fields("narration", &[("text", 0x30)]));
+        scene.blocks[1].records[7]
+            .code
+            .push(fields("set_flag", &[("flag", 91), ("clear", 0)]));
+        let orig = find_battle(&scene, 2, &[], None).unwrap();
+        let text = text();
+        let mut none = |_: Pos, _: u8| -> Result<CellChange, String> { Ok(None) };
+        let c = convert(
+            &base_battle(),
+            &orig,
+            &names(),
+            &pair("b", 1, 0, 2),
+            "hexz_02",
+            &mut EventSources {
+                text: &text,
+                cell_change: &mut none,
+            },
+        )
+        .unwrap();
+        let rec9: Vec<&EventDef> = c
+            .battle
+            .events
+            .iter()
+            .filter(|e| {
+                e.trigger
+                    == Trigger::UnitDefeated {
+                        target: "person_300".into(),
+                    }
+            })
+            .collect();
+        let drama = |scene: &str| EventAction::Drama {
+            scene: scene.into(),
+        };
+        let shape: Vec<(bool, &[EventAction])> = rec9
+            .iter()
+            .map(|e| (e.when.is_empty(), &e.actions[..]))
+            .collect();
+        assert_eq!(shape.len(), 3, "{rec9:#?}");
+        assert_eq!(shape[0], (true, &[drama("orig_b_9")][..]));
+        assert_eq!(shape[1], (false, &[drama("orig_b_9_2")][..]));
+        // The stage moves on once, after the guarded part.
+        assert!(shape[2].0);
+        assert_eq!(
+            shape[2].1.first(),
+            Some(&EventAction::SetStage { stage: 1 })
+        );
+        assert!(rec9.iter().all(|e| e.stage == Some(0)));
+    }
+
     #[test]
     fn route_flags_decide_the_conditions() {
         let mut scene = scene();
@@ -3905,7 +4074,8 @@ item = "wine"
             on_route.drama
         );
         // Flag 90 is set by record 9 and tested by record 7: a battle flag and a condition. Only
-        // the narration it guards waits for it; the arrival does not.
+        // the narration it guards waits for it; the arrival does not. The narration comes first,
+        // as in the script.
         let events = &on_route.battle.events;
         let rec7: Vec<&EventDef> = events
             .iter()
@@ -3913,16 +4083,7 @@ item = "wine"
             .collect();
         assert_eq!(rec7.len(), 2, "{rec7:#?}");
         assert_eq!(
-            (&rec7[0].when[..], &rec7[0].actions[..]),
-            (
-                &[][..],
-                &[EventAction::Spawn {
-                    group: "original_7".into()
-                }][..]
-            )
-        );
-        assert_eq!(
-            rec7[1].when,
+            rec7[0].when,
             [FlagCond {
                 flag: "orig_b_90".into(),
                 cmp: Compare::Eq,
@@ -3930,10 +4091,20 @@ item = "wine"
             }]
         );
         assert_eq!(
-            rec7[1].actions,
+            rec7[0].actions,
             [EventAction::Drama {
                 scene: "orig_b_7".into()
             }]
+        );
+        assert_eq!(rec7[0].stage, Some(0));
+        assert_eq!(
+            (&rec7[1].when[..], &rec7[1].actions[..]),
+            (
+                &[][..],
+                &[EventAction::Spawn {
+                    group: "original_7".into()
+                }][..]
+            )
         );
         assert_eq!(rec7[1].stage, Some(0));
         assert!(events
@@ -4628,6 +4799,102 @@ item = "wine"
             "{:?}",
             c.notes
         );
+    }
+
+    /// The army's changes of the opening (group 2) are made once, before the camp
+    /// (`chapters::before_scene`), not again as the battle begins; an enemy's level is the
+    /// battle's own.
+    #[test]
+    fn the_openings_army_changes_are_made_before_the_camp_only() {
+        let prep = Block {
+            offset: 0,
+            records: vec![record(
+                0,
+                0,
+                false,
+                [0; 6],
+                vec![setup(Some(54), 25, vec![unit(0, 1, 1)])],
+            )],
+        };
+        let battle = Block {
+            offset: 0,
+            records: vec![
+                record(
+                    0,
+                    0,
+                    false,
+                    [0; 6],
+                    vec![
+                        roster(vec![unit(54, 9, 4), unit(300, 8, 4)]),
+                        fields("load_map", &[("map", 0x3002)]),
+                    ],
+                ),
+                record(0, 1, false, [0; 6], vec![op("begin_battle")]),
+                record(
+                    0,
+                    2,
+                    false,
+                    [0; 6],
+                    vec![
+                        fields("add_levels", &[("person", 1), ("levels", 2)]),
+                        fields("add_levels", &[("person", 54), ("levels", 1)]),
+                        fields("set_allegiance", &[("person", 54), ("army", 0)]),
+                        fields("dialogue", &[("text", 0x10)]),
+                    ],
+                ),
+            ],
+        };
+        let scene = Scene {
+            blocks: vec![prep, battle],
+        };
+        let c = convert_leg(&scene, 2, 0, "o");
+        let actions: Vec<&EventAction> = c.battle.events.iter().flat_map(|e| &e.actions).collect();
+        // The officer who joins leaves the enemy's ranks by their unit's own tag (a deployed
+        // copy of them would match their officer id).
+        assert_eq!(
+            actions,
+            [
+                &EventAction::LevelUp {
+                    target: "boss".into(),
+                    amount: 1
+                },
+                &EventAction::Retreat {
+                    target: "person_54".into()
+                },
+                &EventAction::Drama {
+                    scene: "orig_o_2".into()
+                },
+            ]
+        );
+        let boss = c
+            .battle
+            .units
+            .iter()
+            .find(|u| u.officer.as_deref() == Some("boss"))
+            .unwrap();
+        assert_eq!(boss.tag.as_deref(), Some("person_54"));
+        assert!(c.army.is_empty(), "{:?}", c.army);
+        assert!(
+            c.notes.iter().any(|n| n.contains("made before the camp")),
+            "{:?}",
+            c.notes
+        );
+        // ...where the camp's scene makes them.
+        let (names, text) = (names(), text());
+        let song_key = |_: u16| None;
+        let none = BTreeSet::new();
+        let ctx = crate::chapters::StoryContext {
+            names: &names,
+            text: &text,
+            song_key: &song_key,
+            block: 1,
+            route_flag: "route",
+            settable: &none,
+            pictures: &none,
+            places: &[],
+        };
+        let before = crate::chapters::before_scene(&scene.blocks[1], &ctx);
+        assert_eq!(before.text, "@level guan_yu 2\n@join boss\n");
     }
 
     #[test]

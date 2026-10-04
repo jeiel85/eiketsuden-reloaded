@@ -177,6 +177,9 @@ struct Writer<'c, 'a> {
     /// With `army_only`: also what the setup says before the sortie (pictures, narration, titles
     /// and dialogue, but not its prompt to deploy: [`is_setup_prompt`]).
     speech: bool,
+    /// The prompts to deploy of the record being written ([`setup_prompts`]), found in the whole
+    /// record: one inside a flag check is told apart by what follows the check.
+    prompts: Vec<*const Instr>,
     /// A picture is shown (`@picture`): the next instruction but a narration clears it.
     picture: bool,
 }
@@ -358,7 +361,8 @@ impl Writer<'_, '_> {
                     }
                 }
                 // The sortie's prompt is the screen's own.
-                "dialogue" if self.speech && is_setup_prompt(code, i) => {}
+                "dialogue"
+                    if self.speech && self.prompts.iter().any(|&p| std::ptr::eq(p, instr)) => {}
                 _ => self.effect(instr),
             }
             i += 1;
@@ -489,6 +493,12 @@ impl Writer<'_, '_> {
                     self.skipped
                         .insert("levels and classes of a battle's enemies set up before it");
                 }
+                // Kept for when they join, they would stay in every save (and make it one older
+                // games refuse) for an officer who never does.
+                Some(id) if !names.player_officers.contains(&id) => {
+                    self.skipped
+                        .insert("levels and classes of officers who never join the army");
+                }
                 Some(id) => {
                     let _ = writeln!(out.text, "@level {id} {}", get("levels").max(1));
                 }
@@ -504,6 +514,10 @@ impl Writer<'_, '_> {
                 (Some(id), _) if self.army_only && !names.player_officers.contains(&id) => {
                     self.skipped
                         .insert("levels and classes of a battle's enemies set up before it");
+                }
+                (Some(id), _) if !names.player_officers.contains(&id) => {
+                    self.skipped
+                        .insert("levels and classes of officers who never join the army");
                 }
                 (Some(id), Some(class)) => {
                     let _ = writeln!(out.text, "@class {id} {class}");
@@ -655,6 +669,7 @@ impl<'c, 'a> Writer<'c, 'a> {
             rec_end: RecordEnd::Outside,
             army_only: false,
             speech: false,
+            prompts: Vec::new(),
             picture: false,
         }
     }
@@ -1048,6 +1063,7 @@ pub fn before_scene(block: &Block, ctx: &StoryContext) -> StoryScene {
         .filter(|r| r.trigger.group < battles::FIRST_PHASE_GROUP)
     {
         w.speech = rec.trigger.group < battles::OPENING_GROUP;
+        w.prompts = setup_prompts(&rec.code);
         // The setup goes on to the battle: its jumps are not the story's.
         let _ = w.lines(&rec.code);
     }
@@ -1062,6 +1078,21 @@ pub fn before_scene(block: &Block, ctx: &StoryContext) -> StoryScene {
         w.out.text.clear();
     }
     w.finish()
+}
+
+/// The dialogues of a battle's setup record `code` that are its prompt ([`is_setup_prompt`]).
+///
+/// Input: the whole code of one setup record. Output: the prompts, by address, which
+/// [`Writer::lines`] compares with the instruction it is at (it walks sub-slices of `code`).
+///
+/// Why the whole record and not the part being written: a prompt the setup says only on some
+/// route sits inside a flag check (`if_flags`), and the `battle_setup` it leads to comes after
+/// the check. Judged inside the check alone, nothing follows it and it stays as story.
+fn setup_prompts(code: &[Instr]) -> Vec<*const Instr> {
+    (0..code.len())
+        .filter(|&i| code[i].mnemonic == "dialogue" && is_setup_prompt(code, i))
+        .map(|i| &code[i] as *const Instr)
+        .collect()
 }
 
 /// Whether the dialogue at `code[i]` of a battle's setup is its prompt and not story: the
@@ -2532,6 +2563,47 @@ mod tests {
         ));
     }
 
+    /// A prompt said only on some route sits inside a flag check: what follows the check (the
+    /// `battle_setup`) makes it the prompt, and the story before it stays.
+    #[test]
+    fn a_setup_prompt_inside_a_flag_check_is_not_story() {
+        let b = block(vec![record(
+            RUN,
+            0,
+            vec![
+                instr("dialogue", &[("text", 2)]),
+                if_flags(1, vec![7], vec![]),
+                instr("dialogue", &[("text", 1)]),
+                instr("battle_setup", &[]),
+            ],
+        )]);
+        let song_key = |_: u16| None;
+        let names = names();
+        let s = before_scene(&b, &ctx(&names, &song_key));
+        assert!(!s.text.contains("잡담"), "{}", s.text);
+        assert!(
+            s.text
+                .starts_with("yuan_shao: 흥.\nliu_bei: 무슨 일입니까?\n"),
+            "{}",
+            s.text
+        );
+        parses(&s.text);
+        // A line of the check with more said after it, before the sortie, is story.
+        let b = block(vec![record(
+            RUN,
+            0,
+            vec![
+                if_flags(1, vec![7], vec![]),
+                instr("dialogue", &[("text", 1)]),
+                instr("dialogue", &[("text", 4)]),
+                instr("battle_setup", &[]),
+            ],
+        )]);
+        let s = before_scene(&b, &ctx(&names, &song_key));
+        assert!(s.text.contains("yuan_shao: 잡담"), "{}", s.text);
+        assert!(!s.text.contains("실례했소"), "{}", s.text);
+    }
+
     #[test]
     fn an_event_picture_shows_over_the_narration_after_it() {
         let b = block(vec![record(
@@ -3109,6 +3181,8 @@ mod tests {
         let song_key = |_: u16| None;
         let mut names = names();
         names.classes.insert(1, "light_cavalry".into());
+        // An officer who joins the army at some point keeps them for then.
+        names.player_officers.insert("yuan_shao".into());
         let s = story_scene(&b, &ctx(&names, &song_key));
         assert_eq!(
             s.text,
@@ -3116,6 +3190,15 @@ mod tests {
         );
         assert!(
             s.notes.iter().any(|n| n.contains("levels of persons")),
+            "{:?}",
+            s.notes
+        );
+        // One who never joins has nothing kept (it would stay in every save).
+        names.player_officers.clear();
+        let s = story_scene(&b, &ctx(&names, &song_key));
+        assert_eq!(s.text, "");
+        assert!(
+            s.notes.iter().any(|n| n.contains("never join the army")),
             "{:?}",
             s.notes
         );

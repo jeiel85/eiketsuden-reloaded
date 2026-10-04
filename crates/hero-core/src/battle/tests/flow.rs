@@ -199,6 +199,52 @@ fn turn_start_events_fire_for_empty_phases_and_reinforcements_join_them() {
     assert_eq!(st.next_ai_unit(), Some(1));
 }
 
+/// A `retreat` event on a unit still waiting in its reinforcement group takes it out of the
+/// battle: the `spawn` after it does not bring it in, and nothing is shown for it.
+#[test]
+fn a_retreat_event_takes_out_a_reinforcement_before_it_arrives() {
+    let mut def = battle(OPEN_MAP);
+    let mut loser = spawn(Side::Enemy, p(7, 0));
+    loser.group = Some("later".into());
+    loser.tag = Some("loser".into());
+    let mut other = spawn(Side::Enemy, p(7, 1));
+    other.group = Some("later".into());
+    def.units = vec![spawn(Side::Enemy, p(7, 7)), loser, other];
+    def.events = vec![
+        event(
+            Trigger::TurnStart {
+                turn: 1,
+                side: Side::Player,
+            },
+            vec![EventAction::Retreat {
+                target: "loser".into(),
+            }],
+        ),
+        event(
+            Trigger::TurnStart {
+                turn: 2,
+                side: Side::Player,
+            },
+            vec![EventAction::Spawn {
+                group: "later".into(),
+            }],
+        ),
+    ];
+    let pack = pack_with(def);
+    let mut st = state(&pack);
+    add(&mut st, &pack, Side::Player, "infantry", 1, p(0, 0));
+    assert_eq!(st.begin(&pack), vec![phase(Side::Player, 1)]);
+    assert_eq!(st.units[1].state, UnitState::Retreated);
+    end_phase(&mut st, &pack);
+    let events = end_phase(&mut st, &pack);
+    assert!(
+        events.contains(&BattleEvent::Spawned { units: vec![2] }),
+        "{events:?}"
+    );
+    assert_eq!(st.units[1].state, UnitState::Retreated);
+    assert_eq!(st.units[2].state, UnitState::Active);
+}
+
 // ----- regeneration, confusion, weather ----------------------------------------------------
 
 #[test]
