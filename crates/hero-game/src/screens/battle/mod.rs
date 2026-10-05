@@ -2100,6 +2100,7 @@ mod tests {
             terrain: BTreeMap::new(),
             backlog: Vec::new(),
             fingerprint: None,
+            playing: None,
         }
     }
 

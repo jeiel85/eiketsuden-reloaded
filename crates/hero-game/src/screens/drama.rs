@@ -42,7 +42,9 @@
 //! [`DramaScreen::resume_point`] reports the runner's position, the message on screen and the
 //! steps that built the stage; [`DramaScreen::restore`] plays those steps again instantly. The
 //! campaign is not rebuilt: it is saved as it is, already holding the side effects of the steps
-//! up to the position.
+//! up to the position. A timed step on screen keeps how far it got ([`SceneResume::playing`]):
+//! a `@wait` goes on with the time left, a fade from the darkness it had reached, and a duel
+//! move is played again from its start.
 
 use crate::app::{Ctx, Enter, Screen, Transition};
 use crate::assets::{AssetState, UNKNOWN_PORTRAIT};
@@ -61,7 +63,7 @@ use crate::ui::theme;
 use crate::ui::window::{draw_highlight, draw_icon, draw_window_ex, inset, WindowStyle};
 use hero_core::drama::{DramaRunner, Step};
 use hero_core::pack::Pack;
-use hero_core::save::{SceneKind, SceneResume};
+use hero_core::save::{Playing, SceneKind, SceneResume};
 use hero_core::script::{Cmd, Slot};
 use macroquad::prelude::*;
 use std::collections::BTreeMap;
@@ -909,6 +911,34 @@ impl Recorder {
 /// Why this does not go through the screen's `present`: replaying needs none of what presenting
 /// does besides changing the stage (no sounds, no message boxes, no backlog), so it works without
 /// a window and can be checked against the live stage in tests.
+/// How far the timed step on screen got, for a quick save ([`SceneResume::playing`]).
+///
+/// Input: what the screen is doing and the stage's darkness (0–1). Output: the record, `None`
+/// for anything that is not a timed step.
+fn playing_of(current: &Current, fade: f32) -> Option<Playing> {
+    match current {
+        Current::Wait(left) => Some(Playing::Wait {
+            ms: (left.max(0.0) * 1000.0).round() as u32,
+        }),
+        Current::Fade => Some(Playing::Fade {
+            permille: (fade.clamp(0.0, 1.0) * 1000.0).round() as u16,
+        }),
+        Current::Duel => Some(Playing::DuelAct),
+        _ => None,
+    }
+}
+
+/// The stage's steps to rebuild instantly, and the duel move to play again when one was
+/// playing (it is the last recorded step then).
+///
+/// Input: the recorded stage and the timed step of the save. Output: (steps, move).
+fn split_playing_move(stage: &[Step], playing: Option<Playing>) -> (&[Step], Option<&Step>) {
+    match (playing, stage.split_last()) {
+        (Some(Playing::DuelAct), Some((last @ Step::DuelAct { .. }, built))) => (built, Some(last)),
+        _ => (stage, None),
+    }
+}
+
 fn replay_stage(
     stage: &mut Stage,
     duel: &mut Option<DuelView>,
@@ -1074,12 +1104,27 @@ impl DramaScreen {
             return screen;
         }
         screen.runner = Some(resume.runner);
-        replay_stage(
-            &mut screen.stage,
-            &mut screen.duel,
-            &screen.terrain,
-            &resume.stage,
-        );
+        // A duel move that was playing is played again from its start: the stage is rebuilt
+        // up to the move before it.
+        let (built, last) = split_playing_move(&resume.stage, resume.playing);
+        replay_stage(&mut screen.stage, &mut screen.duel, &screen.terrain, built);
+        match (resume.playing, last) {
+            (_, Some(Step::DuelAct { side, act })) => {
+                if let Some(duel) = screen.duel.as_mut() {
+                    duel.act(*side, *act);
+                    screen.current = Current::Duel;
+                }
+            }
+            (Some(Playing::Wait { ms }), _) if ms > 0 => {
+                screen.current = Current::Wait(ms as f32 / 1000.0);
+            }
+            (Some(Playing::Fade { permille }), _) => {
+                // From where it was towards the end the recorded fade step set.
+                screen.stage.fade = f32::from(permille.min(1000)) / 1000.0;
+                screen.current = Current::Fade;
+            }
+            _ => {}
+        }
         // The recorder starts from what was replayed, so the restored scene can be saved again.
         for step in &resume.stage {
             screen.recorder.record(step);
@@ -1830,9 +1875,10 @@ impl Screen for DramaScreen {
     /// it cannot be saved this instant (no runner: the scene failed to load; done: the screen is
     /// about to be replaced).
     ///
-    /// Why a `Wait`, a fade or a duel move in progress saves as "between steps": their effect
-    /// on the stage is in the recorded steps and their timing is not worth keeping; a title
-    /// card or a banner is kept as the step so it shows again.
+    /// Why a `Wait`, a fade or a duel move in progress saves its time apart
+    /// ([`SceneResume::playing`]): its effect on the stage is in the recorded steps already, so
+    /// only how far it got is missing to go on with it; a title card or a banner is kept as the
+    /// step so it shows again.
     fn resume_point(&self, ctx: &Ctx) -> Option<ResumePoint> {
         let Some(runner) = &self.runner else {
             return Some(ResumePoint::Unavailable("장면이 준비되지 않았습니다"));
@@ -1876,6 +1922,7 @@ impl Screen for DramaScreen {
                 .as_deref()
                 .and_then(|p| p.scene(&runner.scene))
                 .map(hero_core::script::Scene::fingerprint),
+            playing: playing_of(&self.current, self.stage.fade),
         })))
     }
 }
@@ -1883,6 +1930,47 @@ impl Screen for DramaScreen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A quick save keeps how far a wait, a fade or a duel move got; nothing else is timed.
+    #[test]
+    fn a_timed_step_saves_how_far_it_got() {
+        assert_eq!(
+            playing_of(&Current::Wait(0.4567), 0.0),
+            Some(Playing::Wait { ms: 457 })
+        );
+        assert_eq!(
+            playing_of(&Current::Fade, 0.25),
+            Some(Playing::Fade { permille: 250 })
+        );
+        assert_eq!(playing_of(&Current::Duel, 1.0), Some(Playing::DuelAct));
+        assert_eq!(playing_of(&Current::Next, 1.0), None);
+        assert_eq!(playing_of(&Current::Done, 1.0), None);
+    }
+
+    /// A duel move that was playing is played again: the stage is rebuilt without it.
+    #[test]
+    fn a_playing_duel_move_is_left_to_play_again() {
+        let duel = Step::Duel {
+            left: "guan_yu".into(),
+            right: "hua_xiong".into(),
+            bg: None,
+        };
+        let act = Step::DuelAct {
+            side: hero_core::script::DuelSide::Left,
+            act: hero_core::script::DuelAct::Charge,
+        };
+        let stage = vec![duel.clone(), act.clone()];
+        let (built, last) = split_playing_move(&stage, Some(Playing::DuelAct));
+        assert_eq!(built, std::slice::from_ref(&duel));
+        assert_eq!(last, Some(&act));
+        // Without a move playing (or a stage that does not end on one) all of it is rebuilt.
+        assert_eq!(split_playing_move(&stage, None), (&stage[..], None));
+        let waited = vec![duel.clone()];
+        assert_eq!(
+            split_playing_move(&waited, Some(Playing::DuelAct)),
+            (&waited[..], None)
+        );
+    }
 
     #[test]
     fn speakers_are_lit_and_others_dimmed() {
