@@ -893,7 +893,7 @@ Actions:
 | `set_stage` | `stage` | Move the battle to another stage (see above). |
 | `set_objective` | `text` | Replace the objective text the battle shows for the rest of the battle (a banner announces it); the victory and defeat conditions do not change. |
 | `set_terrain` | `pos`, `terrain`, `image` (opt.) | Change one tile's terrain for the rest of the battle (a gate opens, a drawbridge comes down); movement and defence follow the new terrain at once. `image` is a media key of `gfx/maps/<image>.png`, one tile in size, drawn over the tile from then on. Without it, a map drawn from the tileset shows the new terrain's tile, while a map with a picture layer keeps its picture there. |
-| `halve` | `side`, `stat` | Halve the `morale` or the `hp` of every unit of one side on the map (a fire or water attack, a ruse; the original's script command `2D`). `side = "enemy"` is the enemy's units, `"player"` (or `"ally"`) the player's units and their allies; units still to arrive are left alone. Morale falls as from an attack (under the original formulas a fall below 30 can confuse); HP is rounded down and stays at least 1. |
+| `halve` | `side`, `stat` | Halve the `morale` or the `hp` of every unit of one side on the map (a fire or water attack, a ruse; the original's script command `2D`). `side = "enemy"` is the enemy's units, `"player"` (or `"ally"`) the player's units and their allies; units still to arrive are left alone. Morale falls as from an attack (under the original formulas a fall below 30 can confuse, and a confused unit left at 0 morale retreats, dropping its item); HP is rounded down and stays at least 1. |
 | `victory` / `defeat` | — | End the battle. |
 
 ### Treasures

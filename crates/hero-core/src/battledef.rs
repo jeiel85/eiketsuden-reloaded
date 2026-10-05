@@ -317,8 +317,8 @@ pub enum EventAction {
     /// Halve the morale or the HP of every unit on the map of one side, as the original's
     /// script command `2D` does (a fire or water attack, a ruse that confuses the enemy).
     /// `enemy` is the enemy's units; `player` (or `ally`) the player's units and their allies.
-    /// Morale falls as an attack's loss does (it can confuse under the original formulas); HP
-    /// is rounded down but stays at least 1.
+    /// Morale falls as an attack's loss does (it can confuse under the original formulas, and a
+    /// confused unit left at 0 retreats as after a blow); HP is rounded down but stays at least 1.
     Halve {
         side: Side,
         stat: HalveStat,

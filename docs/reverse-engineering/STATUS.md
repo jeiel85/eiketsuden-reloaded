@@ -11,7 +11,7 @@
 > decoded: the `NPK016` codec and the opening/ending pictures and palettes, `MARK`/`SSCCHR`, saves, Steam and PC-98
 > containers. Original mode: `hero-tools original pack` (and the game itself, at launch) converts the player's copy
 > into a layered pack over the base pack: portraits, unit sheets, a tileset and the 58 maps, the rule tables, the
-> battle, camp and status frames, event pictures, the music, all 60 of the original's battles (Changban and Wagu Pass,
+> battle, camp and status frames, event pictures, the music, all 62 of the original's battles (Changban and Wagu Pass,
 > fought on two maps, are two battles each) with their in-battle events, dialogue, duels and Changban's escort of
 > the people, and the story of chapters 2–4 up to the original's endings; a battle whose setup or rosters the
 > original picks by route flags is one battle per route (D23). Allies arrive during a battle on the tiles the setup keeps for them. Remaining: the opening lines of chapter battles, the

@@ -34,7 +34,8 @@
 //!   scene written from the player's copy (duels included, as dialogue with sound), and its
 //!   actions — units joining (`spawn`), AI changes, levels, retreats, gold and items, map cells
 //!   that change (a gate opens, a drawbridge comes down: `set_terrain` with the new chips'
-//!   picture) and the end of the battle. The original's trigger groups are phases (FORMATS
+//!   picture), halvings of one side's morale or troops (`halve`), the end of the battle and its
+//!   loss (`game_over`: `defeat`). The original's trigger groups are phases (FORMATS
 //!   §13.2): a parallel group watches all its records until one leaves parallel control, any
 //!   other group runs the first record whose trigger holds; a battle with more than one phase
 //!   gets `stage`s. Where the base battle keeps an event with the same trigger (the duels the
