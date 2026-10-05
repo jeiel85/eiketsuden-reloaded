@@ -1111,7 +1111,10 @@ impl DramaScreen {
         match (resume.playing, last) {
             (_, Some(Step::DuelAct { side, act })) => {
                 if let Some(duel) = screen.duel.as_mut() {
-                    duel.act(*side, *act);
+                    // Played again from its start, with its sound, as `present` plays it.
+                    if let Some(key) = duel.act(*side, *act) {
+                        ctx.sfx(key);
+                    }
                     screen.current = Current::Duel;
                 }
             }
