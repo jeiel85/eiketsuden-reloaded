@@ -528,9 +528,9 @@ impl EventAction {
             | EventAction::Halve { .. }
             | EventAction::Victory
             | EventAction::Defeat => Vec::new(),
-            EventAction::When { actions, .. } => {
-                actions.iter().flat_map(EventAction::unit_refs).collect()
-            }
+            // Its actions' references are theirs: walk them with [`EventAction::all`], which
+            // yields each nested action once.
+            EventAction::When { .. } => Vec::new(),
         }
     }
 }
@@ -547,8 +547,7 @@ impl BattleDef {
         let mut refs: Vec<UnitRef<'_>> = conditions.flat_map(Condition::unit_refs).collect();
         for e in &self.events {
             refs.extend(e.trigger.unit_refs());
-            refs.extend(e.actions.iter().flat_map(EventAction::unit_refs));
-            // (Nested actions are in their `when`'s refs.)
+            refs.extend(e.all_actions().into_iter().flat_map(EventAction::unit_refs));
         }
         refs.extend(
             self.units

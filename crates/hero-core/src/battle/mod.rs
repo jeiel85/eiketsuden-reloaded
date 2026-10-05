@@ -548,6 +548,35 @@ impl BattleState {
         self.flags_hold(&event.when, &event.unless)
     }
 
+    /// The actions of `actions` that would run now: those inside a `when` action only while its
+    /// flags allow ([`BattleState::flags_hold`]), in order.
+    ///
+    /// Input: an event's actions. Output: the ones on the path the flags take now.
+    ///
+    /// Why: what judges an event by its actions (the AI's goals: does it win or lose the
+    /// battle?) must not count a guarded part that cannot run, nor let one guarded ending
+    /// hide another that can (mutually exclusive `victory` and `defeat` parts).
+    pub fn active_actions<'a>(
+        &self,
+        actions: &'a [crate::battledef::EventAction],
+    ) -> Vec<&'a crate::battledef::EventAction> {
+        let mut out = Vec::new();
+        for a in actions {
+            out.push(a);
+            if let crate::battledef::EventAction::When {
+                when,
+                unless,
+                actions,
+            } = a
+            {
+                if self.flags_hold(when, unless) {
+                    out.extend(self.active_actions(actions));
+                }
+            }
+        }
+        out
+    }
+
     /// Every condition of `when` holds and, when `unless` has any, not all of them do (an
     /// event's or an [`crate::battledef::EventAction::When`]'s flags).
     pub fn flags_hold(

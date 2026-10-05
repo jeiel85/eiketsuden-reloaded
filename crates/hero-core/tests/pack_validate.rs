@@ -657,6 +657,24 @@ fn stage_and_terrain_actions_are_checked() {
     assert!(issues.is_empty(), "{}", format_issues(&issues));
 }
 
+/// A reference inside a `when` action is checked once, however deep it is nested.
+#[test]
+fn a_nested_unit_reference_is_reported_once() {
+    let mut files = fixture_files();
+    edit(
+        &mut files,
+        "battles/b01.toml",
+        "{ type = \"spawn\", group = \"rein\" }",
+        "{ type = \"spawn\", group = \"rein\" }, { type = \"when\", actions = [{ type = \"when\", actions = [{ type = \"retreat\", target = \"nobody\" }] }] }",
+    );
+    let issues = load(&files).validate();
+    let found = issues
+        .iter()
+        .filter(|i| i.msg.contains("`nobody` matches no unit"))
+        .count();
+    assert_eq!(found, 1, "{issues:#?}");
+}
+
 #[test]
 fn battle_logic_checks() {
     run(&[

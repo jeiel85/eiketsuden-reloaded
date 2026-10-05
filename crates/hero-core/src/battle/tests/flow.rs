@@ -1134,6 +1134,30 @@ actions = [
     assert!(text.contains("type = \"when\""), "{text}");
 }
 
+/// What would run now: a `when` action's part only while its flags allow, so mutually
+/// exclusive guarded endings are told apart by the route.
+#[test]
+fn the_active_actions_follow_the_flags_of_their_when() {
+    let src = r#"
+trigger = { type = "turn_start", turn = 1, side = "enemy" }
+actions = [
+  { type = "when", when = [{ flag = "route", cmp = "==", value = 2 }], actions = [{ type = "victory" }] },
+  { type = "when", unless = [{ flag = "route", cmp = "==", value = 2 }], actions = [{ type = "defeat" }] },
+]
+"#;
+    let e: EventDef = toml::from_str(src).unwrap();
+    let pack = pack(OPEN_MAP);
+    let mut st = state(&pack);
+    st.start_flags.insert("route".into(), 2);
+    let active = st.active_actions(&e.actions);
+    assert!(active.contains(&&EventAction::Victory));
+    assert!(!active.contains(&&EventAction::Defeat));
+    st.start_flags.insert("route".into(), 1);
+    let active = st.active_actions(&e.actions);
+    assert!(active.contains(&&EventAction::Defeat));
+    assert!(!active.contains(&&EventAction::Victory));
+}
+
 fn def_of(pack: &Pack) -> &BattleDef {
     &pack.battles[BATTLE]
 }
