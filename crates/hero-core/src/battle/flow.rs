@@ -5,7 +5,7 @@ use super::board::Board;
 use super::{
     BattleEvent, BattleState, DefeatReason, MapImage, Outcome, UnitId, UnitState, Weather,
 };
-use crate::battledef::{in_reach, AiMode, Condition, EventAction, Side, Trigger};
+use crate::battledef::{in_reach, AiMode, Condition, EventAction, HalveStat, Side, Trigger};
 use crate::data::StatusKind;
 use crate::geom::Pos;
 use crate::pack::Pack;
@@ -443,6 +443,31 @@ impl BattleState {
                         });
                     }
                     ev.push(BattleEvent::TerrainChanged { pos: *pos });
+                }
+            }
+            EventAction::Halve { side, stat } => {
+                let enemy = *side == Side::Enemy;
+                let ids: Vec<UnitId> = self
+                    .units
+                    .iter()
+                    .filter(|u| u.is_active() && (u.side == Side::Enemy) == enemy)
+                    .map(|u| u.id)
+                    .collect();
+                for id in ids {
+                    match stat {
+                        HalveStat::Morale => {
+                            let before = self.units[id].morale;
+                            self.units[id].morale = before / 2;
+                            let set = self.morale_set(pack, id, before);
+                            ev.extend(Self::morale_set_event(id, set));
+                        }
+                        // (The original stores half of 1 troop as 0 and leaves the unit
+                        // standing; the engine has no unit at 0 HP that has not retreated.)
+                        HalveStat::Hp => {
+                            let u = &mut self.units[id];
+                            u.hp = (u.hp / 2).max(1);
+                        }
+                    }
                 }
             }
             EventAction::Victory => {

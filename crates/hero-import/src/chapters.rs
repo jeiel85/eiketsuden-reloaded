@@ -16,7 +16,6 @@
 //! re-staged like the paired ones ([`crate::battles::convert`]) from a base made from the
 //! original's header ([`chapter_base`]).
 
-use crate::battles::BATTLE_MAP;
 use crate::battles::{self, Names, TextSource};
 use crate::scenario::{story, Block, Instr, Operands, Record, Scene};
 use hero_core::battledef::{BattleDef, Condition, DeployDef, MapDef};
@@ -60,10 +59,7 @@ pub fn parts(scene: &Scene) -> Vec<Part> {
             continue;
         }
         let code = || block.records.iter().flat_map(|r| &r.code);
-        let battle_map = code()
-            .filter(|c| c.mnemonic == "load_map")
-            .filter_map(|c| c.operands.get("map"))
-            .find(|m| m & 0xf000 == BATTLE_MAP);
+        let battle_map = battles::loaded_battle_maps(block).next();
         // The setup may come in the block before (with the camp's story).
         let sets_up = code().any(story::sets_up_battle);
         match battle_map {
@@ -1879,6 +1875,32 @@ mod tests {
                         instr("narration", &[("text", 11)]),
                     ],
                 )]),
+                // The setup ends the battle before into its own map (SNR4's last two).
+                block(vec![
+                    record(
+                        0,
+                        0,
+                        vec![
+                            instr("battle_setup", &[]),
+                            instr("battle_roster", &[]),
+                            instr("battle_end", &[("next_map", 0x3012)]),
+                        ],
+                    ),
+                    record(0, 1, vec![instr("begin_battle", &[])]),
+                    record(0, 2, vec![instr("dialogue", &[("text", 2)])]),
+                ]),
+                // A phase's `battle_end` to a battle map loads nothing of this block's.
+                block(vec![
+                    record(
+                        0,
+                        0,
+                        vec![
+                            instr("narration", &[("text", 11)]),
+                            instr("battle_roster", &[]),
+                        ],
+                    ),
+                    record(0, 3, vec![instr("battle_end", &[("next_map", 0x3013)])]),
+                ]),
             ],
         };
         assert_eq!(
@@ -1891,6 +1913,12 @@ mod tests {
                     leg: 0
                 },
                 Part::Story { block: 3 },
+                Part::Battle {
+                    block: 4,
+                    map: 18,
+                    leg: 0
+                },
+                Part::Story { block: 5 },
             ]
         );
     }

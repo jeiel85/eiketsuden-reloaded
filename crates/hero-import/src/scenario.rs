@@ -342,7 +342,7 @@ pub const OPCODES: &[OpInfo] = &[
     op!(0x2b, "data", Layout::Fixed(&[b("kind"), w("value")]),
         "data operation: kind 2 adds gold, kind 4 is a battle routine (always value 50: the +50 EXP bonus?)"),
     op!(0x2c, "redraw", NONE, "redraw the screen"),
-    op!(0x2d, "halve", Layout::Fixed(&[b("a"), b("b")]), "halving routine (debug text: halve)"),
+    op!(0x2d, "halve", Layout::Fixed(&[b("a"), b("b")]), "halve the morale (b 0) or troops of one side's units on the field (a 0: the player's side)"),
     op!(0x2e, "reset_player_position", Layout::Fixed(&[w("target"), b("x"), b("y"), b("dir")]),
         "reset the player's position"),
     op!(0x2f, "set_graphic", Layout::Fixed(&[person("person"), b("graphic")]),

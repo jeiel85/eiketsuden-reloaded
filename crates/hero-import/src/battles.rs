@@ -76,8 +76,8 @@
 use crate::bakdata::{Item, Officer};
 use crate::scenario::{BattleHeader, Block, Instr, Operands, Record, RosterUnit, Scene};
 use hero_core::battledef::{
-    AiMode, BattleDef, Condition, EventAction, EventDef, FlagCond, MapDef, Side, TreasureDef,
-    Trigger, UnitSpawn,
+    AiMode, BattleDef, Condition, EventAction, EventDef, FlagCond, HalveStat, MapDef, Side,
+    TreasureDef, Trigger, UnitSpawn,
 };
 use hero_core::geom::Pos;
 use hero_core::script::Compare;
@@ -253,14 +253,32 @@ pub fn battle_set_flags(scene: &Scene) -> BTreeSet<u8> {
         .collect()
 }
 
+/// The battle map (`0x3NNN`) instruction `c` of record `rec` loads: a `load_map` of one, or a
+/// battle setup's `battle_end` to one (a `run` record before the phases; SNR4's last two
+/// battles load their maps so). A phase's `battle_end` to a battle map is not a load: the battle
+/// goes on with that map ([`MapLeg`]).
+pub(crate) fn loaded_battle_map(rec: &Record, c: &Instr) -> Option<u16> {
+    let map = match c.mnemonic {
+        "load_map" => c.operands.get("map"),
+        "battle_end" if rec.trigger.kind == RUN && rec.trigger.group < FIRST_PHASE_GROUP => {
+            c.operands.get("next_map")
+        }
+        _ => None,
+    }?;
+    (map & 0xf000 == BATTLE_MAP).then_some(map)
+}
+
+/// The battle maps the records of `block` load ([`loaded_battle_map`]), in script order.
+pub(crate) fn loaded_battle_maps(block: &Block) -> impl Iterator<Item = u16> + '_ {
+    block
+        .records
+        .iter()
+        .flat_map(|r| r.code.iter().filter_map(move |c| loaded_battle_map(r, c)))
+}
+
 /// Whether `block` loads a battle map.
 fn loads_battle_map(block: &Block) -> bool {
-    block.records.iter().flat_map(|r| &r.code).any(|c| {
-        c.mnemonic == "load_map"
-            && c.operands
-                .get("map")
-                .is_some_and(|m| m & 0xf000 == BATTLE_MAP)
-    })
+    loaded_battle_maps(block).next().is_some()
 }
 
 /// Whether block `index` of `scene` only sets a battle up (map and rosters) and the block after
@@ -569,7 +587,6 @@ pub fn find_battle_leg(
     leg: u8,
 ) -> Result<OriginalBattle, String> {
     let wanted = BATTLE_MAP | u16::from(map);
-    let is_load = |op: &Operands| op.get("map") == Some(wanted);
     let (block_index, record_index) = if leg == 0 {
         scene
             .blocks
@@ -580,7 +597,7 @@ pub fn find_battle_leg(
                 block.records.iter().enumerate().find_map(|(r, rec)| {
                     rec.code
                         .iter()
-                        .any(|i| i.mnemonic == "load_map" && is_load(&i.operands))
+                        .any(|i| loaded_battle_map(rec, i) == Some(wanted))
                         .then_some((b, r))
                 })
             })
@@ -2032,12 +2049,36 @@ impl EventWriter<'_, '_> {
                         });
                     }
                 }
+                // MAIN.EXE image 0x2D5DD: `a` 0 is the player's side (unit slots 0–14, allies
+                // too), else the enemy's (15–44); `b` 0 halves morale through the morale
+                // setter, else troops. Only units on the field (state 2) are touched.
+                "halve" => {
+                    flush(&mut scene, actions, self);
+                    actions.push(EventAction::Halve {
+                        side: if get("a") == 0 {
+                            Side::Player
+                        } else {
+                            Side::Enemy
+                        },
+                        stat: if get("b") == 0 {
+                            HalveStat::Morale
+                        } else {
+                            HalveStat::Hp
+                        },
+                    });
+                }
                 "leave_parallel" => {
                     end = ScriptEnd::LeavesPhase;
                     break;
                 }
                 "battle_end" | "goto_block" => {
                     end = ScriptEnd::EndsBattle;
+                    break;
+                }
+                // The battle is lost (SNR4's Ye castle burns down at turn 28).
+                "game_over" => {
+                    flush(&mut scene, actions, self);
+                    actions.push(EventAction::Defeat);
                     break;
                 }
                 "set_objective" => match self.sources.text.string(get("text")) {
@@ -4021,6 +4062,103 @@ item = "wine"
             Some(&EventAction::SetStage { stage: 1 })
         );
         assert!(rec9.iter().all(|e| e.stage == Some(0)));
+    }
+
+    /// The script's halving command (`2D`) is a `halve` action in its place: `a` names the side
+    /// (0 the player's), `b` what is halved (0 morale, else troops).
+    #[test]
+    fn the_halving_command_halves_one_sides_morale_or_troops() {
+        let mut scene = scene();
+        let code = &mut scene.blocks[1].records[9].code;
+        code.insert(0, fields("halve", &[("a", 1), ("b", 0)]));
+        code.insert(1, fields("halve", &[("a", 0), ("b", 1)]));
+        let orig = find_battle(&scene, 2, &[], None).unwrap();
+        let text = text();
+        let mut cells = |_: Pos, _: u8| -> Result<CellChange, String> {
+            Ok(Some(("bridge".into(), Some("cell_3_1".into()))))
+        };
+        let c = convert(
+            &base_battle(),
+            &orig,
+            &names(),
+            &pair("b", 1, 0, 2),
+            "hexz_02",
+            &mut EventSources {
+                text: &text,
+                cell_change: &mut cells,
+            },
+        )
+        .unwrap();
+        let rec9 = c
+            .battle
+            .events
+            .iter()
+            .find(|e| {
+                e.trigger
+                    == Trigger::UnitDefeated {
+                        target: "person_300".into(),
+                    }
+            })
+            .unwrap();
+        assert_eq!(
+            rec9.actions[..2],
+            [
+                EventAction::Halve {
+                    side: Side::Enemy,
+                    stat: HalveStat::Morale,
+                },
+                EventAction::Halve {
+                    side: Side::Player,
+                    stat: HalveStat::Hp,
+                },
+            ]
+        );
+        assert!(matches!(rec9.actions[2], EventAction::SetTerrain { .. }));
+    }
+
+    /// A trigger record's `game_over` loses the battle there; what follows it never runs.
+    #[test]
+    fn a_game_over_in_a_battle_script_is_a_defeat() {
+        let mut scene = scene();
+        let code = &mut scene.blocks[1].records[9].code;
+        code.insert(0, fields("narration", &[("text", 0x30)]));
+        code.insert(1, op("game_over"));
+        let orig = find_battle(&scene, 2, &[], None).unwrap();
+        let text = text();
+        let mut cells = |_: Pos, _: u8| -> Result<CellChange, String> { Ok(None) };
+        let c = convert(
+            &base_battle(),
+            &orig,
+            &names(),
+            &pair("b", 1, 0, 2),
+            "hexz_02",
+            &mut EventSources {
+                text: &text,
+                cell_change: &mut cells,
+            },
+        )
+        .unwrap();
+        let rec9: Vec<&EventDef> = c
+            .battle
+            .events
+            .iter()
+            .filter(|e| {
+                e.trigger
+                    == Trigger::UnitDefeated {
+                        target: "person_300".into(),
+                    }
+            })
+            .collect();
+        assert_eq!(rec9.len(), 1, "{rec9:#?}");
+        assert_eq!(
+            rec9[0].actions,
+            [
+                EventAction::Drama {
+                    scene: "orig_b_9".into()
+                },
+                EventAction::Defeat
+            ]
+        );
     }
 
     #[test]

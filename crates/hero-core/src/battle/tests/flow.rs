@@ -7,8 +7,8 @@ use crate::battle::{
     UnitId, UnitState, Weather,
 };
 use crate::battledef::{
-    AiMode, BattleDef, BonusDef, Condition, EventAction, EventDef, FlagCond, Side, Trigger,
-    UnitSpawn,
+    AiMode, BattleDef, BonusDef, Condition, EventAction, EventDef, FlagCond, HalveStat, Side,
+    Trigger, UnitSpawn,
 };
 use crate::data::{StatusKind, WeatherChances};
 use crate::geom::Pos;
@@ -949,6 +949,74 @@ fn set_objective_replaces_the_objective_text() {
     assert_eq!(st.objective_text(&pack), "여포를 물리쳐라");
     let saved: BattleState = serde_json::from_str(&serde_json::to_string(&st).unwrap()).unwrap();
     assert_eq!(saved.objective_text(&pack), "여포를 물리쳐라");
+}
+
+/// `halve` halves the HP or the morale of one side's units on the map: `player` takes the
+/// allies along, units still to arrive are left alone, HP stays at least 1, and a morale fall
+/// confuses as the original's morale setter does.
+#[test]
+fn halve_touches_one_sides_units_on_the_map() {
+    let mut def = battle(OPEN_MAP);
+    def.events = vec![event(
+        Trigger::TurnStart {
+            turn: 1,
+            side: Side::Player,
+        },
+        vec![
+            EventAction::Halve {
+                side: Side::Enemy,
+                stat: HalveStat::Hp,
+            },
+            EventAction::Halve {
+                side: Side::Player,
+                stat: HalveStat::Morale,
+            },
+        ],
+    )];
+    let pack = pack_with(def);
+    let mut st = state(&pack);
+    let me = add(&mut st, &pack, Side::Player, "infantry", 1, p(0, 0));
+    let friend = add(&mut st, &pack, Side::Ally, "infantry", 1, p(2, 0));
+    let foe = add(&mut st, &pack, Side::Enemy, "infantry", 1, p(7, 7));
+    let weak = add(&mut st, &pack, Side::Enemy, "infantry", 1, p(5, 7));
+    let later = add(&mut st, &pack, Side::Enemy, "infantry", 1, p(3, 7));
+    st.units[foe].hp = 101;
+    st.units[weak].hp = 1;
+    st.units[later].state = UnitState::Hidden;
+    st.units[me].morale = 100;
+    st.units[friend].morale = 61;
+    let (my_hp, later_hp) = (st.units[me].hp, st.units[later].hp);
+    st.begin(&pack);
+    assert_eq!(st.units[foe].hp, 50, "rounded down");
+    assert_eq!(st.units[weak].hp, 1, "not below 1");
+    assert_eq!(st.units[later].hp, later_hp, "not on the map yet");
+    assert_eq!(st.units[me].hp, my_hp, "the other side");
+    assert_eq!((st.units[me].morale, st.units[friend].morale), (50, 30));
+    assert_eq!(st.units[foe].morale, 100, "the other side");
+    assert!(
+        [me, friend]
+            .iter()
+            .all(|&u| st.units[u].statuses.is_empty()),
+        "the engine's formulas: no confusion from a morale fall"
+    );
+
+    // The original formulas: a fall below 30 confuses with 60 %.
+    let mut pack = pack;
+    pack.rules.strategy_formulas = crate::data::StrategyFormulas::Original;
+    let mut hits = 0;
+    for seed in 0..400 {
+        let mut st = BattleState::new(&pack, BATTLE, &campaign(Vec::new(), &[]), seed).unwrap();
+        let u = add(&mut st, &pack, Side::Player, "infantry", 1, p(0, 0));
+        add(&mut st, &pack, Side::Enemy, "infantry", 1, p(7, 7));
+        st.units[u].morale = 50;
+        let ev = st.begin(&pack);
+        assert_eq!(st.units[u].morale, 25);
+        if st.units[u].has_status(StatusKind::Confused) {
+            assert!(ev.contains(&BattleEvent::Confused { unit: u }), "{ev:?}");
+            hits += 1;
+        }
+    }
+    assert!((200..280).contains(&hits), "60% of 400: {hits}");
 }
 
 /// Events with `when` wait for their flags: set by this battle's events, else as the campaign
