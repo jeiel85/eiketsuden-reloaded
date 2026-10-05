@@ -977,6 +977,7 @@ fn halve_touches_one_sides_units_on_the_map() {
     let mut st = state(&pack);
     let me = add(&mut st, &pack, Side::Player, "infantry", 1, p(0, 0));
     let friend = add(&mut st, &pack, Side::Ally, "infantry", 1, p(2, 0));
+    let shaken = add(&mut st, &pack, Side::Player, "infantry", 1, p(4, 0));
     let foe = add(&mut st, &pack, Side::Enemy, "infantry", 1, p(7, 7));
     let weak = add(&mut st, &pack, Side::Enemy, "infantry", 1, p(5, 7));
     let later = add(&mut st, &pack, Side::Enemy, "infantry", 1, p(3, 7));
@@ -985,6 +986,8 @@ fn halve_touches_one_sides_units_on_the_map() {
     st.units[later].state = UnitState::Hidden;
     st.units[me].morale = 100;
     st.units[friend].morale = 61;
+    st.units[shaken].morale = 1;
+    st.units[shaken].statuses = vec![confused(2)];
     let (my_hp, later_hp) = (st.units[me].hp, st.units[later].hp);
     st.begin(&pack);
     assert_eq!(st.units[foe].hp, 50, "rounded down");
@@ -993,6 +996,11 @@ fn halve_touches_one_sides_units_on_the_map() {
     assert_eq!(st.units[me].hp, my_hp, "the other side");
     assert_eq!((st.units[me].morale, st.units[friend].morale), (50, 30));
     assert_eq!(st.units[foe].morale, 100, "the other side");
+    assert_eq!(
+        st.units[shaken].state,
+        UnitState::Retreated,
+        "confused at 0 morale: retreats as after a blow"
+    );
     assert!(
         [me, friend]
             .iter()

@@ -7,7 +7,7 @@
 //! that still make sense) and takes from the original:
 //!
 //! * the map: `[map] use = "hexz_NN"`, the converted `HEXZMAP` entry the scenario loads
-//!   (`load_map` `0x3NNN`, FORMATS §13.3);
+//!   (`load_map` `0x3NNN`, or the setup's `battle_end` to it, FORMATS §13.3);
 //! * the turn limit (header of `battle_setup`, `0x03`);
 //! * the deployment tiles: the player slots of `battle_setup`, in order (slots that need a flag are
 //!   left out). A named officer of the setup whom the base battle has as an allied or guest unit
@@ -253,14 +253,14 @@ pub fn battle_set_flags(scene: &Scene) -> BTreeSet<u8> {
         .collect()
 }
 
-/// The battle map (`0x3NNN`) instruction `c` of record `rec` loads: a `load_map` of one, or a
-/// battle setup's `battle_end` to one (a `run` record before the phases; SNR4's last two
-/// battles load their maps so). A phase's `battle_end` to a battle map is not a load: the battle
-/// goes on with that map ([`MapLeg`]).
-pub(crate) fn loaded_battle_map(rec: &Record, c: &Instr) -> Option<u16> {
+/// The battle map (`0x3NNN`) instruction `c` of a record with trigger `trigger` loads: a
+/// `load_map` of one, or a battle setup's `battle_end` to one (a `run` record before the phases;
+/// SNR4's last two battles load their maps so). A phase's `battle_end` to a battle map is not a
+/// load: the battle goes on with that map ([`MapLeg`]).
+pub(crate) fn loaded_battle_map(trigger: &crate::scenario::Trigger, c: &Instr) -> Option<u16> {
     let map = match c.mnemonic {
         "load_map" => c.operands.get("map"),
-        "battle_end" if rec.trigger.kind == RUN && rec.trigger.group < FIRST_PHASE_GROUP => {
+        "battle_end" if trigger.kind == RUN && trigger.group < FIRST_PHASE_GROUP => {
             c.operands.get("next_map")
         }
         _ => None,
@@ -270,10 +270,11 @@ pub(crate) fn loaded_battle_map(rec: &Record, c: &Instr) -> Option<u16> {
 
 /// The battle maps the records of `block` load ([`loaded_battle_map`]), in script order.
 pub(crate) fn loaded_battle_maps(block: &Block) -> impl Iterator<Item = u16> + '_ {
-    block
-        .records
-        .iter()
-        .flat_map(|r| r.code.iter().filter_map(move |c| loaded_battle_map(r, c)))
+    block.records.iter().flat_map(|r| {
+        r.code
+            .iter()
+            .filter_map(move |c| loaded_battle_map(&r.trigger, c))
+    })
 }
 
 /// Whether `block` loads a battle map.
@@ -597,7 +598,7 @@ pub fn find_battle_leg(
                 block.records.iter().enumerate().find_map(|(r, rec)| {
                     rec.code
                         .iter()
-                        .any(|i| loaded_battle_map(rec, i) == Some(wanted))
+                        .any(|i| loaded_battle_map(&rec.trigger, i) == Some(wanted))
                         .then_some((b, r))
                 })
             })
@@ -1333,9 +1334,18 @@ enum ScriptEnd {
     LeavesPhase,
     /// `battle_end` (the battle is won) or `goto_block` (the scenario moves on).
     EndsBattle,
+    /// `game_over`: the battle is lost.
+    Lost,
     /// A part guarded by flags other records set ended the script ([`Branch`]); what follows
     /// it runs only while the flags do not hold.
     Branched,
+}
+
+impl ScriptEnd {
+    /// Whether the battle is over (won or lost) where the script ended.
+    fn ends_battle(self) -> bool {
+        matches!(self, ScriptEnd::EndsBattle | ScriptEnd::Lost)
+    }
 }
 
 /// A part of a record's script that runs only while flags other records set hold (an `if_flags`
@@ -2079,6 +2089,7 @@ impl EventWriter<'_, '_> {
                 "game_over" => {
                     flush(&mut scene, actions, self);
                     actions.push(EventAction::Defeat);
+                    end = ScriptEnd::Lost;
                     break;
                 }
                 "set_objective" => match self.sources.text.string(get("text")) {
@@ -2708,7 +2719,7 @@ pub fn convert(
         let leaves = match end {
             ScriptEnd::LeavesPhase => true,
             ScriptEnd::Done => !parallel,
-            ScriptEnd::EndsBattle | ScriptEnd::Branched => false,
+            ScriptEnd::EndsBattle | ScriptEnd::Lost | ScriptEnd::Branched => false,
         };
         if !leaves {
             return Vec::new();
@@ -2722,8 +2733,9 @@ pub fn convert(
             Next::Stage(next, on_the_way) => {
                 let mut actions = vec![EventAction::SetStage { stage: next }];
                 for w in on_the_way {
-                    if writer.on_the_way(w, &orig.records[w].code, &mut actions)
-                        == ScriptEnd::EndsBattle
+                    if writer
+                        .on_the_way(w, &orig.records[w].code, &mut actions)
+                        .ends_battle()
                     {
                         break;
                     }
@@ -2753,7 +2765,7 @@ pub fn convert(
         {
             let end = writer.script(r, &rec.code, &mut actions, true);
             guarded.append(&mut writer.branches);
-            if end == ScriptEnd::EndsBattle {
+            if end.ends_battle() {
                 ends = true;
                 break;
             }
@@ -2766,8 +2778,9 @@ pub fn convert(
                     break;
                 }
                 for &r in &phase.records {
-                    if writer.on_the_way(r, &orig.records[r].code, &mut actions)
-                        == ScriptEnd::EndsBattle
+                    if writer
+                        .on_the_way(r, &orig.records[r].code, &mut actions)
+                        .ends_battle()
                     {
                         break 'opening;
                     }
@@ -2862,7 +2875,8 @@ pub fn convert(
                         if !kept.actions.contains(&a) {
                             kept.actions.push(a);
                         }
-                    } else if !kept.actions.contains(&a) {
+                    } else if matches!(a, EventAction::Halve { .. }) || !kept.actions.contains(&a) {
+                        // (Halving twice is not halving once.)
                         kept.actions.insert(at, a);
                         at += 1;
                     }
@@ -4159,6 +4173,50 @@ item = "wine"
                 EventAction::Defeat
             ]
         );
+
+        // Guarded by a flag record 7 sets: the defeat ends that part only (the battle does not
+        // move on after it), and the rest of the script runs while the flag is clear.
+        let mut scene = self::scene();
+        scene.blocks[1].records[7]
+            .code
+            .push(fields("set_flag", &[("flag", 91), ("clear", 0)]));
+        let code = &mut scene.blocks[1].records[9].code;
+        code.insert(0, guard(1, vec![91], vec![]));
+        code.insert(1, op("game_over"));
+        let orig = find_battle(&scene, 2, &[], None).unwrap();
+        let c = convert(
+            &base_battle(),
+            &orig,
+            &names(),
+            &pair("b", 1, 0, 2),
+            "hexz_02",
+            &mut EventSources {
+                text: &text,
+                cell_change: &mut cells,
+            },
+        )
+        .unwrap();
+        let rec9: Vec<&EventDef> = c
+            .battle
+            .events
+            .iter()
+            .filter(|e| {
+                e.trigger
+                    == Trigger::UnitDefeated {
+                        target: "person_300".into(),
+                    }
+            })
+            .collect();
+        let flag = FlagCond {
+            flag: "orig_b_91".into(),
+            cmp: Compare::Ne,
+            value: 0,
+        };
+        let lost = rec9.iter().find(|e| e.when.contains(&flag)).unwrap();
+        assert_eq!(lost.actions, [EventAction::Defeat], "{rec9:#?}");
+        let rest = rec9.iter().find(|e| e.unless.contains(&flag)).unwrap();
+        assert!(!rest.actions.contains(&EventAction::Defeat));
+        assert!(rest.actions.contains(&EventAction::SetStage { stage: 1 }));
     }
 
     #[test]

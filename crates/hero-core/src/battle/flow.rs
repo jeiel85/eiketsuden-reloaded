@@ -460,6 +460,8 @@ impl BattleState {
                             self.units[id].morale = before / 2;
                             let set = self.morale_set(pack, id, before);
                             ev.extend(Self::morale_set_event(id, set));
+                            // A confused unit left without morale retreats, as after a blow.
+                            self.retreat_if_beaten(id, ev);
                         }
                         // (The original stores half of 1 troop as 0 and leaves the unit
                         // standing; the engine has no unit at 0 HP that has not retreated.)
