@@ -124,6 +124,11 @@ pub struct SceneResume {
     /// Recent lines for the backlog: speaker and text, oldest first.
     #[serde(default)]
     pub backlog: Vec<(Option<String>, String)>,
+    /// [`crate::script::Scene::fingerprint`] of the scene when it was saved: with it the record
+    /// plays on in another version of the pack whose scene is the same. Saves made before it
+    /// existed have none and need the same pack version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
 }
 
 impl SceneResume {
@@ -201,14 +206,23 @@ impl SaveGame {
     /// before the saved position, so playing the node's scene again from its first line would
     /// apply them a second time. Nor can the position be trusted against a changed scene: the
     /// same `pc` may name another command. So a record is played only against the very pack
-    /// version it was made with (a changed pack is expected to carry a new version), and
-    /// only when it still fits that pack's scene and campaign node.
+    /// version it was made with (a changed pack is expected to carry a new version) or a pack
+    /// whose scene has the fingerprint it saved ([`SceneResume::fingerprint`]), and only when
+    /// it still fits that pack's scene and campaign node.
     pub fn check_resume(&self, pack: &crate::pack::Pack) -> Result<(), ResumeError> {
         use crate::campaign::Node;
         let Some(scene) = &self.scene else {
             return Ok(());
         };
-        if self.pack_version != pack.manifest.version {
+        // Another pack version is fine for the very same scene: its commands and labels, which
+        // the saved position counts in, are unchanged (BACKLOG, ROADMAP M7-4).
+        let same_scene = || {
+            scene.fingerprint.as_deref().is_some_and(|f| {
+                pack.scene(&scene.runner.scene)
+                    .is_some_and(|s| s.fingerprint() == f)
+            })
+        };
+        if self.pack_version != pack.manifest.version && !same_scene() {
             return Err(ResumeError::PackVersion {
                 saved: self.pack_version.clone(),
                 current: pack.manifest.version.clone(),
@@ -331,6 +345,7 @@ mod tests {
             bgm: Some("camp".into()),
             terrain: BTreeMap::from([("liu_bei".to_string(), "plain".to_string())]),
             backlog: vec![(Some("유비".into()), "가자.".into()), (None, "…".into())],
+            fingerprint: None,
         }
     }
 

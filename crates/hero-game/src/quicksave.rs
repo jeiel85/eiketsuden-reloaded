@@ -133,7 +133,7 @@ pub fn playable(pack: &Pack, save: &SaveGame) -> Result<(), String> {
 pub fn describe(error: &ResumeError) -> String {
     match error {
         ResumeError::PackVersion { saved, current } => format!(
-            "장면 도중의 기록은 같은 버전의 데이터 팩에서만 이어 할 수 있습니다 (기록 {saved}, 현재 {current})"
+            "장면 도중의 기록은 그 장면이 바뀐 데이터 팩에서 이어 할 수 없습니다 (기록 {saved}, 현재 {current})"
         ),
         ResumeError::SceneChanged(scene) => {
             format!("기록된 장면 `{scene}`이(가) 데이터 팩에서 바뀌었거나 없어졌습니다")
@@ -168,6 +168,7 @@ mod tests {
             bgm: None,
             terrain: BTreeMap::new(),
             backlog: Vec::new(),
+            fingerprint: None,
         }
     }
 
