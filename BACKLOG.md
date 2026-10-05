@@ -15,14 +15,6 @@
   - 영향 범위: hero-core `campaign.rs` `Difficulty::enemy_level_offset`, `battle/combat.rs` `JOINT_ATTACK_STEP`·`JOINT_ATTACK_MAX`
     (값을 바꾸면 RULES.md §4·§7.6과 D25의 숫자도 고친다: 테스트 `the_documents_state_the_numbers_of_the_new_game_choices`).
     사람 플레이 전 기계 비교: `hero-tools simulate <팩> --campaign --difficulty hard` / `--extended-rules`.
-- [ ] **능력치 자유 조정의 빠른 입력 (PR #89 리뷰)**
-  - 무엇을: 길게 누르면 빨라지거나 ±10 단계를 더한다.
-  - 왜: 지금은 1씩이라 1→100이 99번이다.
-  - 영향 범위: hero-game `screens/camp/officers.rs` `update_edit`
-- [ ] **설정형 선택 기능 다듬기 (PR #91 리뷰)**
-  - 무엇을: (1) 얼굴 설정을 바꾼 직후 새 그림을 읽는 동안 실루엣이 잠깐 보이는 것 → 준비될 때까지 이전 그림 유지. (2) 프레임 없는 기본 팩에서 흔들림 때 지도 가장자리 3px이 0.25초 드러날 수 있음 → 뷰포트 scissor. (3) 위험 범위가 이벤트 직후 한 프레임 늦게 갱신됨.
-  - 왜: 모두 보기만의 사소한 결함이라 기능을 막지 않는다.
-  - 영향 범위: hero-game `assets.rs`, `screens/battle/draw.rs`·`mod.rs`
 
 ## 원작 전투 (2026-09-28 `battles.rs` 도입 후)
 

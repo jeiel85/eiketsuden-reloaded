@@ -68,6 +68,38 @@ impl Camera {
         )
     }
 
+    /// Shake the drawing by `offset` (canvas pixels), as far as the map still covers the parts of
+    /// the viewport it covers without shaking.
+    ///
+    /// Input: the scene's shake offset. Output: none; sets [`Camera::shake`].
+    ///
+    /// Why limit it instead of clipping the drawing: at a map edge a full shake would uncover a
+    /// strip of the screen's backdrop beside the map, which a pack without a battle frame does
+    /// not cover. Limited per side, the map moves only inward there and still shakes.
+    pub fn set_shake(&mut self, offset: Vec2) {
+        let pos = self.pos();
+        let axis = |s: f32, view_at: f32, view: f32, at: f32, map: f32| {
+            // Where the map's two edges are drawn without the shake.
+            let (first, last) = (view_at - at, view_at - at + map);
+            let most = if first <= view_at {
+                view_at - first
+            } else {
+                f32::INFINITY
+            };
+            let least = if last >= view_at + view {
+                view_at + view - last
+            } else {
+                f32::NEG_INFINITY
+            };
+            s.clamp(least.min(0.0), most.max(0.0))
+        };
+        let vp = self.viewport;
+        self.shake = vec2(
+            axis(offset.x, vp.x, vp.w, pos.x, self.map_size.x),
+            axis(offset.y, vp.y, vp.h, pos.y, self.map_size.y),
+        );
+    }
+
     /// Current position (map pixel at the viewport's top-left), rounded to whole pixels.
     pub fn pos(&self) -> Vec2 {
         self.pos.round()
@@ -227,6 +259,34 @@ mod tests {
         w: 480.0,
         h: 256.0,
     };
+
+    /// At a map edge the shake moves the map inward only, so no backdrop shows beside it; away
+    /// from the edges and on a map smaller than the view it shakes fully.
+    #[test]
+    fn the_shake_never_uncovers_the_screen_beside_the_map() {
+        // Larger than the view both ways, scrolled to the top-left corner.
+        let mut c = Camera::new(VIEW, vec2(640.0, 640.0), 16.0);
+        c.set_shake(vec2(3.0, 3.0));
+        assert_eq!(c.shake, vec2(0.0, 0.0));
+        c.set_shake(vec2(-3.0, -3.0));
+        assert_eq!(c.shake, vec2(-3.0, -3.0));
+        // In the middle: both ways.
+        c.set_pos(vec2(64.0, 64.0));
+        c.set_shake(vec2(3.0, -3.0));
+        assert_eq!(c.shake, vec2(3.0, -3.0));
+        // At the bottom-right corner: only towards it.
+        c.set_pos(vec2(1000.0, 1000.0));
+        c.set_shake(vec2(-3.0, 3.0));
+        assert_eq!(c.shake, vec2(0.0, 3.0));
+        c.set_shake(vec2(3.0, -3.0));
+        assert_eq!(c.shake, vec2(3.0, 0.0));
+        // Narrower than the view: centred with the backdrop beside it anyway, so it shakes.
+        let mut c = Camera::new(VIEW, vec2(384.0, 288.0), 16.0);
+        c.set_shake(vec2(3.0, 0.0));
+        assert_eq!(c.shake.x, 3.0);
+        c.set_shake(vec2(-3.0, 0.0));
+        assert_eq!(c.shake.x, -3.0);
+    }
 
     #[test]
     fn small_axes_are_centred_large_axes_clamped() {
