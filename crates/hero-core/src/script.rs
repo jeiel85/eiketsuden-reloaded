@@ -246,7 +246,33 @@ pub struct Scene {
     pub labels: BTreeMap<String, usize>,
 }
 
+/// Version prefix of [`Scene::fingerprint`]: a fingerprint of another definition never
+/// matches.
+pub const FINGERPRINT_VERSION: &str = "v1";
+
 impl Scene {
+    /// What identifies the scene's commands and labels across pack versions: a quick save made
+    /// in the middle of the scene is played on in a newer pack whose scene has the same
+    /// fingerprint ([`crate::save::SaveGame::check_resume`]).
+    ///
+    /// Input: the scene. Output: `v1:` and 16 hex digits.
+    ///
+    /// Why this form: the position of a saved scene is a command index, so "the same scene"
+    /// means the same command list and labels, whatever else in the pack changed. They are
+    /// hashed in their JSON form (field order fixed by the type) with FNV-1a 64, whose result
+    /// does not depend on the Rust version as `std`'s hasher may; a change of `Cmd` itself
+    /// changes the fingerprint, which refuses the save (the safe side).
+    pub fn fingerprint(&self) -> String {
+        let text =
+            serde_json::to_string(&(&self.cmds, &self.labels)).expect("scene commands serialize");
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in text.bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        format!("{FINGERPRINT_VERSION}:{hash:016x}")
+    }
+
     pub fn label_index(&self, label: &str) -> Option<usize> {
         self.labels.get(label).copied()
     }
@@ -677,6 +703,28 @@ fn parse_slot(s: &str) -> Option<Slot> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fingerprint of a scene is fixed: games of other versions compute the same text for
+    /// the same scene (a quick save made in one plays on in another), and any change of its
+    /// commands or labels gives another.
+    #[test]
+    fn a_scenes_fingerprint_is_fixed_and_follows_its_commands() {
+        let src = "== s\nliu_bei: 가자.\n@label next\n@gold +10\n@goto next\n";
+        let scene = &parse_drama("t", src).unwrap()[0];
+        // A change here means saves of earlier games stop playing on in newer packs: bump
+        // `FINGERPRINT_VERSION` instead of updating the value silently.
+        assert_eq!(scene.fingerprint(), "v1:58b210658ad11b44");
+        let same = &parse_drama("t", &format!("# comment\n{src}")).unwrap()[0];
+        assert_eq!(same.fingerprint(), scene.fingerprint());
+        for other in [
+            "== s\nliu_bei: 가자!\n@label next\n@gold +10\n@goto next\n",
+            "== s\nliu_bei: 가자.\n@label again\n@gold +10\n@goto again\n",
+            "== s\n@gold +10\nliu_bei: 가자.\n@label next\n@goto next\n",
+        ] {
+            let changed = &parse_drama("t", other).unwrap()[0];
+            assert_ne!(changed.fingerprint(), scene.fingerprint(), "{other}");
+        }
+    }
 
     const SAMPLE: &str = r#"
 # 주석

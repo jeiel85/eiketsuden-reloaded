@@ -346,6 +346,13 @@ impl App {
         if is_key_pressed(quicksave::LOAD_KEY) {
             self.handle(Transition::QuickLoad);
         }
+        if is_key_pressed(quicksave::SLOT_KEY) {
+            self.ctx.settings.next_quick_slot();
+            self.ctx.commit_settings();
+            let slot = self.ctx.settings.quick_save_slot();
+            self.ctx.sfx(sfx::CURSOR);
+            self.ctx.toast(format!("F5·F9: {}", slot.name()));
+        }
     }
 
     /// Write the quick save slot. Ignored during a fade (the stack is about to change and would
@@ -358,7 +365,8 @@ impl App {
         match quicksave::save(&mut self.ctx, &self.stack) {
             Ok(()) => {
                 self.ctx.sfx(sfx::CONFIRM);
-                self.ctx.toast("순간 저장했습니다.");
+                let slot = self.ctx.settings.quick_save_slot();
+                self.ctx.toast(format!("{}에 저장했습니다.", slot.name()));
             }
             Err(why) => {
                 macroquad::logging::warn!("quick save failed: {}", why);
@@ -376,7 +384,8 @@ impl App {
         }
         match quicksave::read(&self.ctx) {
             Ok(save) => {
-                self.ctx.toast("순간 저장을 불러옵니다.");
+                let slot = self.ctx.settings.quick_save_slot();
+                self.ctx.toast(format!("{}을(를) 불러옵니다.", slot.name()));
                 Some(Transition::Flow(Flow::Continue(Box::new(save))))
             }
             Err(why) => {

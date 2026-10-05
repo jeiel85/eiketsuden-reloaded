@@ -1871,6 +1871,11 @@ impl Screen for DramaScreen {
                 .entries()
                 .map(|e| (e.speaker.clone(), e.text.clone()))
                 .collect(),
+            fingerprint: ctx
+                .pack
+                .as_deref()
+                .and_then(|p| p.scene(&runner.scene))
+                .map(hero_core::script::Scene::fingerprint),
         })))
     }
 }

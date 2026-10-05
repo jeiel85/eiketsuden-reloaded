@@ -47,6 +47,7 @@ fn resume_of(runner: &DramaRunner, choice: Option<Vec<String>>) -> SceneResume {
         bgm: None,
         terrain: BTreeMap::new(),
         backlog: Vec::new(),
+        fingerprint: None,
     }
 }
 
@@ -211,6 +212,26 @@ fn a_scene_record_of_another_pack_version_or_node_is_refused() {
             saved: "0.0.0-old".into(),
             current: pack.manifest.version.clone(),
         })
+    );
+
+    // ...but a record that kept its scene's fingerprint plays on while the scene is the same
+    // (another part of the pack changed), and is refused once the scene itself changed.
+    let mut fingerprinted = old.clone();
+    let scene = pack.scene("oath").unwrap();
+    fingerprinted.scene.as_mut().unwrap().fingerprint = Some(scene.fingerprint());
+    assert_eq!(fingerprinted.check_resume(&pack), Ok(()));
+    let mut changed = fingerprinted.clone();
+    changed.scene.as_mut().unwrap().fingerprint = Some("v1:0000000000000000".into());
+    assert!(matches!(
+        changed.check_resume(&pack),
+        Err(ResumeError::PackVersion { .. })
+    ));
+    // It still has to fit the node and the scene.
+    let mut elsewhere = fingerprinted.clone();
+    elsewhere.campaign.node = "camp1".into();
+    assert_eq!(
+        elsewhere.check_resume(&pack),
+        Err(ResumeError::WrongNode("camp1".into()))
     );
 
     // The node that played the scene is no longer where the campaign is, or is not a drama.
