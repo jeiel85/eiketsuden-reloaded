@@ -15,8 +15,10 @@
 //! * **AI phases** — one unit at a time from `next_ai_unit` / `ai_actions`, animated like the
 //!   player's actions; holding confirm fast-forwards.
 //! * **Quick save** — F5 saves at any moment ([`crate::quicksave`]): the state is already past
-//!   whatever is animating, so it is saved as it is, together with the drama scenes the
-//!   animation had queued but not started; loading shows those scenes first and then goes on
+//!   whatever is animating, so it is saved as it is, together with the animation still playing
+//!   ([`BattleReplay`]: the state before it and its events, drama scenes included) or, once a
+//!   drama scene of it has started, the scenes it had queued but not started; loading shows
+//!   the scenes first, then plays the animation again from the state before it, and goes on
 //!   from the state. Before the objective window is dismissed (the battle has not begun) there
 //!   is nothing to save but the campaign: loading starts the battle from the top.
 //!
@@ -68,7 +70,7 @@ use hero_core::battle::{Action, BattleEvent, BattleState, MapImage, Outcome, Uni
 use hero_core::battledef::{EventAction, Side};
 use hero_core::geom::Pos;
 use hero_core::pack::{BattleFrame, Pack};
-use hero_core::save::SceneResume;
+use hero_core::save::{BattleReplay, SceneResume};
 use macroquad::prelude::*;
 use player::{Command, Mode, PlayerUi, Request};
 use sprites::{FxDef, UnitsFile};
@@ -296,6 +298,11 @@ pub struct BattleScreen {
     /// Scenes to show over the battle before it goes on: the scene a quick save was made in
     /// and the ones its animation had queued (see the module docs).
     queued_scenes: VecDeque<QueuedScene>,
+    /// The animation being played since the queue was last idle: the state before it and the
+    /// events it shows, so a quick save can play it again after loading ([`BattleReplay`]).
+    replay: Option<BattleReplay>,
+    /// `replay` came from a quick save and is played once the title card is gone.
+    replay_on_title: bool,
     /// The pending move can be undone (its events were a plain `Moved`).
     move_undoable: bool,
     /// Jump to the player's units when the queue runs dry after a player phase started.
@@ -354,6 +361,7 @@ impl BattleScreen {
         ctx: &mut Ctx,
         scene: Option<SceneResume>,
         pending_scenes: Vec<String>,
+        replay: Option<BattleReplay>,
     ) -> Box<dyn Screen> {
         let pack = ctx.pack.clone();
         let battle = ctx.session.as_ref().and_then(|s| s.battle.clone());
@@ -376,6 +384,13 @@ impl BattleScreen {
                             .into_iter()
                             .chain(pending_scenes.into_iter().map(QueuedScene::Fresh))
                             .collect();
+                        // The animation the save interrupted: the map shows where the units
+                        // stood before it, and it plays again after the title card.
+                        if let Some(r) = replay.filter(|r| fits_replay(r, &screen.state)) {
+                            screen.scene = anim::Scene::new(&r.before);
+                            screen.replay = Some(r);
+                            screen.replay_on_title = true;
+                        }
                         Box::new(screen)
                     }
                 }
@@ -443,6 +458,8 @@ impl BattleScreen {
             ai: None,
             ai_pause: 0.0,
             queued_scenes: VecDeque::new(),
+            replay: None,
+            replay_on_title: false,
             move_undoable: false,
             focus_player: false,
             idle_time: 0.0,
@@ -764,8 +781,10 @@ impl BattleScreen {
 
     /// Apply an action, keep the session in sync and queue its animation.
     fn apply(&mut self, ctx: &mut Ctx, action: Action) -> Option<Vec<BattleEvent>> {
+        let before = self.events.is_idle().then(|| self.state.clone());
         match self.state.apply(&self.pack, action.clone()) {
             Ok(events) => {
+                self.record_replay(before, &events);
                 self.store_session(ctx);
                 self.events
                     .push(anim::plan(&events, &self.state, &self.pack, &self.meta.fx));
@@ -861,8 +880,43 @@ impl BattleScreen {
         }
     }
 
+    /// The animation to keep in a quick save ([`BattleReplay`]): the one playing, unless one of
+    /// its drama scenes has started (that scene is saved on its own, and playing the events
+    /// again would show it twice). Its scenes not started yet play with it, so they are not
+    /// kept apart as pending scenes then.
+    fn saved_replay(&self) -> Option<BattleReplay> {
+        let r = self.replay.as_ref()?;
+        if self.replay_on_title {
+            // Loaded and not played yet: kept as it was.
+            return Some(r.clone());
+        }
+        let scenes = r
+            .events
+            .iter()
+            .filter(|e| matches!(e, BattleEvent::Drama { .. }))
+            .count();
+        (scenes == self.events.pending_dramas().len()).then(|| r.clone())
+    }
+
+    /// Note the events an action queued for the animation ([`BattleScreen::replay`]): they
+    /// start a new record when the queue was idle (`before` is the state then), else they
+    /// follow the record's.
+    fn record_replay(&mut self, before: Option<BattleState>, events: &[BattleEvent]) {
+        match (self.replay.as_mut(), before) {
+            (Some(r), _) => r.events.extend_from_slice(events),
+            (None, Some(before)) => {
+                self.replay = Some(BattleReplay {
+                    before,
+                    events: events.to_vec(),
+                })
+            }
+            (None, None) => {}
+        }
+    }
+
     /// The animation queue ran dry: snap the views to the state and continue the flow.
     fn events_done(&mut self) {
+        self.replay = None;
         self.scene.sync(&self.state);
         if matches!(self.ui.mode, Mode::Walking { .. }) {
             self.ui.walked(&self.state, self.move_undoable);
@@ -886,7 +940,9 @@ impl BattleScreen {
     }
 
     fn begin_battle(&mut self, ctx: &mut Ctx) {
+        let before = self.events.is_idle().then(|| self.state.clone());
         let events = self.state.begin(&self.pack);
+        self.record_replay(before, &events);
         self.store_session(ctx);
         self.events
             .push(anim::plan(&events, &self.state, &self.pack, &self.meta.fx));
@@ -1249,6 +1305,7 @@ impl BattleScreen {
             Request::Invalid => ctx.sfx(sfx::ERROR),
             Request::BattleMenu => self.open_battle_menu(ctx),
             Request::Restore(snapshot) => {
+                self.replay = None;
                 self.state = *snapshot;
                 self.store_session(ctx);
                 self.scene.sync(&self.state);
@@ -1927,8 +1984,9 @@ impl BattleScreen {
     ///
     /// Why the state is saved as it is even while a move or an enemy attack is animating: the
     /// state is the source of truth and is already past the animation (`apply` runs the rules
-    /// first and animates the events after), which loading simply snaps to. What the animation
-    /// still owed the player is the scenes of its queued drama beats, so those are kept.
+    /// first and animates the events after). What the animation still owed the player is kept
+    /// beside it: the animation itself ([`BattleScreen::saved_replay`]), or the scenes of its
+    /// queued drama beats when it cannot be played again.
     /// Why `None` before the battle begins: `state.begin` has not run, so the saved state would
     /// load as a battle with no intro; the campaign node alone loads it from the top. A battle
     /// that was itself resumed is different: its state is a real one, even under its title card.
@@ -1944,13 +2002,23 @@ impl BattleScreen {
                 QueuedScene::Fresh(id) => pending_scenes.push(id.clone()),
             }
         }
-        pending_scenes.extend(self.events.pending_dramas());
+        let replay = self.saved_replay();
+        if replay.is_none() {
+            pending_scenes.extend(self.events.pending_dramas());
+        }
         Some(ResumePoint::Battle {
             state: Box::new(self.state.clone()),
             pending_scenes,
             scene,
+            replay: replay.map(Box::new),
         })
     }
+}
+
+/// Whether a saved [`BattleReplay`] can be played against `state`: the same battle and the
+/// same units (the replay's views are indexed like the state's).
+fn fits_replay(r: &BattleReplay, state: &BattleState) -> bool {
+    r.before.battle_id == state.battle_id && r.before.units.len() == state.units.len()
 }
 
 /// The terrain id under each officer of `state` on the map, for the duels of its scenes
@@ -2007,13 +2075,31 @@ impl BattleScreen {
                         ctx.sfx(sfx::CONFIRM);
                     } else {
                         self.stage = Stage::Battle;
-                        // Resumed mid-battle: announce whose phase it is.
-                        let ev = [BattleEvent::PhaseStart {
-                            side: self.state.phase,
-                            turn: self.state.turn,
-                        }];
-                        self.events
-                            .push(anim::plan(&ev, &self.state, &self.pack, &self.meta.fx));
+                        match self.replay.as_ref().filter(|_| self.replay_on_title) {
+                            // The animation a quick save interrupted plays again.
+                            Some(r) => {
+                                let beats =
+                                    anim::plan(&r.events, &self.state, &self.pack, &self.meta.fx);
+                                self.replay_on_title = false;
+                                self.events.push(beats);
+                                if self.events.take_finished() {
+                                    self.events_done();
+                                }
+                            }
+                            // Resumed mid-battle: announce whose phase it is.
+                            None => {
+                                let ev = [BattleEvent::PhaseStart {
+                                    side: self.state.phase,
+                                    turn: self.state.turn,
+                                }];
+                                self.events.push(anim::plan(
+                                    &ev,
+                                    &self.state,
+                                    &self.pack,
+                                    &self.meta.fx,
+                                ));
+                            }
+                        }
                     }
                 }
                 return Transition::None;
@@ -2110,6 +2196,7 @@ mod tests {
                 state,
                 pending_scenes,
                 scene,
+                ..
             }) => (*state, pending_scenes, scene.map(|s| *s)),
             other => panic!("expected a battle report, got {other:?}"),
         }
@@ -2167,6 +2254,55 @@ mod tests {
         let (_, pending, scene) = battle_report(&s);
         assert_eq!(pending, vec!["p1_rein", "p1_duel", "p1_outro"]);
         assert_eq!(scene, Some(scene_record()));
+    }
+
+    /// The animation an action queued is recorded from the state before it until the queue
+    /// runs dry, and a quick save keeps it with its scenes not started yet (they play with it);
+    /// once one of its scenes has started, the save keeps the animation finished as before.
+    #[test]
+    fn a_quick_save_keeps_the_animation_still_playing() {
+        let mut s = screen(false);
+        s.stage = Stage::Battle;
+        let before = s.state.clone();
+        let duel = BattleEvent::Drama {
+            scene: "p1_duel".into(),
+        };
+        let first = [BattleEvent::PhaseStart {
+            side: Side::Enemy,
+            turn: 1,
+        }];
+        s.record_replay(Some(before.clone()), &first);
+        // A second action while the first still animates follows the first record.
+        s.record_replay(Some(s.state.clone()), std::slice::from_ref(&duel));
+        let r = s.replay.clone().unwrap();
+        assert_eq!(r.before, before);
+        assert_eq!(r.events, [first[0].clone(), duel.clone()]);
+        s.events
+            .push(anim::plan(&r.events, &s.state, &s.pack, &BTreeMap::new()));
+        let report = |s: &BattleScreen| match s.report() {
+            Some(ResumePoint::Battle {
+                pending_scenes,
+                replay,
+                ..
+            }) => (pending_scenes, replay),
+            other => panic!("expected a battle report, got {other:?}"),
+        };
+        // The duel has not started: it plays with the animation, not apart.
+        let (pending, replay) = report(&s);
+        assert!(pending.is_empty(), "{pending:?}");
+        assert_eq!(replay.as_deref(), Some(&r));
+        // Its scene has started (no drama beat left in the queue): saved as before.
+        s.events = EventPlayer::default();
+        let (pending, replay) = report(&s);
+        assert!(pending.is_empty() && replay.is_none());
+        // The queue ran dry: nothing is recorded any more.
+        s.events_done();
+        assert!(s.replay.is_none());
+        // A replay of another battle or other units is not played.
+        assert!(fits_replay(&r, &s.state));
+        let mut other = r.clone();
+        other.before.units.pop();
+        assert!(!fits_replay(&other, &s.state));
     }
 
     #[test]
