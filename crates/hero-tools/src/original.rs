@@ -997,8 +997,8 @@ mod tests {
         // The base pack's one battle, Sishui Pass, is re-staged on its original map (verified
         // values: FORMATS §13.4): the campaign does not play it (D21), but it stays in the chain.
         // (Then the original's chapters, made from the original battles: chapters 2 to 4 have
-        // forty-three, the two that are fought on two maps, Changban and Wagu Pass, counting for
-        // two.)
+        // forty-five, the two that are fought on two maps, Changban and Wagu Pass, counting for
+        // two; chapter 4's last two load their maps from their setup, issue #95.)
         // A battle of the original's chapters: `c<file>_s<scene>_b<block>[_<leg>]`.
         let is_chapter = |id: &str| {
             let mut parts = id.split('_');
@@ -1030,7 +1030,7 @@ mod tests {
                 ["c2_s", "c3_s", "c4_s"].iter().any(|c| id.starts_with(c))
             })
             .count();
-        assert_eq!(later, 11 + 21 + 11, "{battles:#?}");
+        assert_eq!(later, 11 + 21 + 13, "{battles:#?}");
         // The prologue and chapter 1 are the original's too: each original battle the base pack
         // follows (the pairing table: the same file, scene and map; 19 battles, Jieqiao and Xiapi
         // counting once) is a battle of its chapter on its map that the campaign plays.
@@ -1396,7 +1396,8 @@ mod tests {
                 .filter(|k| k.starts_with(c) && !is_variant(k))
                 .count()
         };
-        assert_eq!((count("c3_s"), count("c4_s")), (21, 11));
+        // (Chapter 4 ends with two battles that load their maps from their setup, issue #95.)
+        assert_eq!((count("c3_s"), count("c4_s")), (21, 13));
         // Fu is fought in two blocks (two routes): each its own battle.
         assert_ne!(
             pack.battles["c3_s2_b6"].events.len(),

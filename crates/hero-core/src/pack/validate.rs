@@ -1468,6 +1468,7 @@ impl<'a> Validator<'a> {
             }
             EventAction::GiveGold { .. }
             | EventAction::SetStage { .. }
+            | EventAction::Halve { .. }
             | EventAction::Victory
             | EventAction::Defeat => {}
         }

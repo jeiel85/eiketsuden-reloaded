@@ -11,7 +11,7 @@
 > decoded: the `NPK016` codec and the opening/ending pictures and palettes, `MARK`/`SSCCHR`, saves, Steam and PC-98
 > containers. Original mode: `hero-tools original pack` (and the game itself, at launch) converts the player's copy
 > into a layered pack over the base pack: portraits, unit sheets, a tileset and the 58 maps, the rule tables, the
-> battle, camp and status frames, event pictures, the music, all 60 of the original's battles (Changban and Wagu Pass,
+> battle, camp and status frames, event pictures, the music, all 62 of the original's battles (Changban and Wagu Pass,
 > fought on two maps, are two battles each) with their in-battle events, dialogue, duels and Changban's escort of
 > the people, and the story of chapters 2–4 up to the original's endings; a battle whose setup or rosters the
 > original picks by route flags is one battle per route (D23). Allies arrive during a battle on the tiles the setup keeps for them. Remaining: the opening lines of chapter battles, the
@@ -47,7 +47,7 @@
 |---|---|---|
 | 화면별 팔레트 슬롯 | 팔레트는 전역이라 그림마다 따로 고르지 않음. 설정 루틴(이미지 0x118CE)을 부르는 감싸개는 셋(0x11946·0x11958·0x11960). 상태 창(0x2F4EB)과 전투(0x208B3 등)는 게임 상태 구조체 DS 0x7A6C의 +5 하위 4비트(`0xcf5:0x21EA`)를 씀, 즉 **그때의 장소 슬롯** **[코드]** | 어느 레코드가 0x7A6C를 채우는지. +5를 쓰는 곳 후보: 이미지 0x14061·0x13897·0x1693C·0x16A4D·0x17C31·0x20632(0x14346은 마을 사람 표 256 × 13 B의 +8을 쓰는 다른 구조체 로더). 지금 원작 모드는 전투 틀 = 맵 슬롯, 상태 창 = 슬롯 0으로 둔 추론 |
 | `PACKGRP` 16색 그림(1·2·37번) | 디코딩 완료 | 맞는 팔레트 슬롯. 추출 종류로도 아직 없음(CLI·`index.json` 변경 필요) |
-| 시나리오 명령 | 0x00–0x3D 전부 길이 확정 | 의미 미확정: `05` show_screen, `06`, `0C`, `16`, `17`의 값, `20` enable_list의 32바이트 표, `23`, `2D` halve(이미지 0x2D5DD가 한 편 전체의 사기를 사기 함수 0x2D628로 절반으로 줄이는 명령. 어느 전투가 쓰는지는 미확인, BACKLOG), `35`의 동작 코드, `36` begin_battle, `3B`/`3C`/`3D`(캠페인 맵 연출). `19`는 모순 길이로 거부(데이터에 없음) |
+| 시나리오 명령 | 0x00–0x3D 전부 길이 확정 | 의미 미확정: `05` show_screen, `06`, `0C`, `16`, `17`의 값, `20` enable_list의 32바이트 표, `23`, `35`의 동작 코드, `36` begin_battle, `3B`/`3C`/`3D`(캠페인 맵 연출). `19`는 모순 길이로 거부(데이터에 없음) |
 | 트리거 | 12종의 판정과 인자 대부분, 전투 블록의 그룹 = 단계와 그룹 플래그 = 병행 제어(FORMATS §13.2) | 판정 반전 비트(0x80)의 정확한 의미, 종류 2의 b 인자, 종류 5, 전투 밖 블록에서의 그룹 플래그 |
 | 전투 명단 블롭 | 무장·좌표·조건·AI·병종·레벨, "나중에 합류" 바이트(슬롯 셋째·명단 둘째), AI 방식 0–6(내부 코드와 이름, FORMATS §13.4) | 나머지 `?` 바이트 |
 | 좌표·맵 번호 | 맵 번호 상위 니블 = 종류, 전투(3)의 하위 바이트 = `HEXZMAP` 항목. 명단·슬롯 좌표는 열이 먼저, 트리거 레코드의 칸은 행이 먼저(FORMATS §13.2·§13.4) | 하위 바이트 → `MMAP`/`SMAP`/`PMAP` 항목 대응, 서장과 1장이 `MMAP` 0번을 함께 쓰는지 |
@@ -111,9 +111,9 @@
      맡지 않는 사람은 `BAKDATA` 값으로 더한다(ORIGINAL_DATA 4.5절, D21). 병종·레벨·장비도 원작 값이고, 원작 전투의 일반 유닛은 그 인물의 능력치로 싸운다.
 2. **시나리오 변환** — 해독한 바이트코드(트리거 그룹·명령)를 우리 이벤트·드라마 형식으로 옮기는 변환기(KOEI 바이트코드를
    실행 중에 해석하지 않음). **부분**: 서장·1장 전투 전체(배치·명단·보물·목표 칸·증원·전투 중 이벤트와 그 대사, 1단계의
-   "원작 전투"), 서장~4장(`SNR0`–`SNR4`)의 전투(2–4장 43개. 전투 안의 `battle_end`가 다른 전투 맵으로 이어지는 장판파·와구관은 전투 둘로 나뉘고, 장판파는 출진 설정의 백성을 아군 유닛으로 호위)와 이야기(마을·캠페인 맵 블록의 대사 장면, 선택지·재질문·루트 분기·마을 이동·원작 플래그·전투 중 설득·패배 후 진행·엔딩 포함)로 만든
-   원작 모드 캠페인(DECISIONS D18·D21, 서장·1장은 실물 변환 확인, 플레이 확인 전). 루트마다 다른 출진 설정·명단은 루트별 전투로(D23). 전투 중 도착하는 아군은 출진 설정이 남겨 둔 칸에(군의 무장이면 플레이어 쪽). 전투의 개막(그룹 2)은 전투 시작 이벤트로, 출진 설정이 보여 주는 삽화·서술·대사는 전투 앞 장면으로, 군 밖 무장의 레벨·병종 변경은 합류 때(D24). 남음: 전투 이벤트 스크립트의 삽화,
-   한 편 전체 사기 절반(`2D`), 남은 명령 의미(BACKLOG).
+   "원작 전투"), 서장~4장(`SNR0`–`SNR4`)의 전투(2–4장 45개. 출진 설정의 `battle_end`로 맵을 불러오는 4장 마지막 두 전투(이슈 #95) 포함. 전투 안의 `battle_end`가 다른 전투 맵으로 이어지는 장판파·와구관은 전투 둘로 나뉘고, 장판파는 출진 설정의 백성을 아군 유닛으로 호위)와 이야기(마을·캠페인 맵 블록의 대사 장면, 선택지·재질문·루트 분기·마을 이동·원작 플래그·전투 중 설득·패배 후 진행·엔딩 포함)로 만든
+   원작 모드 캠페인(DECISIONS D18·D21, 서장·1장은 실물 변환 확인, 플레이 확인 전). 루트마다 다른 출진 설정·명단은 루트별 전투로(D23). 전투 중 도착하는 아군은 출진 설정이 남겨 둔 칸에(군의 무장이면 플레이어 쪽). 전투의 개막(그룹 2)은 전투 시작 이벤트로, 출진 설정이 보여 주는 삽화·서술·대사는 전투 앞 장면으로, 군 밖 무장의 레벨·병종 변경은 합류 때(D24). 한 편 전체의 사기·병력 절반(`2D`, FORMATS §13)은 이벤트 동작 `halve`로, 전투 이벤트의 `game_over`는 패배로. 남음: 전투 이벤트 스크립트의 삽화,
+   남은 명령 의미(BACKLOG).
 3. **규칙 표** — `MAIN.EXE` 규칙 표를 코드 서명으로 찾아 팩 규칙 파일로 변환(값은 사용자의 파일에서만 읽음). **부분**: 이동 비용·지형 효과 → 원작 모드 `rules/terrain.toml`(원작의 문은 닫힌 성문이라 기본 팩의 열린 `gate`와 따로 `closed_gate` 지형을 더한다. 기본 팩과 다른 값은 `original-pack.json`에 적는다). 병종의 공격·방어 계수·이동력·공격 범위·병력 → `rules/classes.toml`, 책략 MP·도달·위력·회복량·효과 범위와 병종별 습득 레벨 → `rules/strategies.toml`·`rules/classes.toml`(FORMATS §10.4 책략 효과), 원작 책략 식(지원 보너스, 혼란 명중·풀림, 사기가 30 미만으로 떨어질 때의 혼란과 오를 때의 풀림 굴림, 최소 피해) → `rules/game.toml`의 `strategy_formulas = "original"`(DECISIONS D19), 회복 아이템 회복량(병력 600/1200/1800, 사기 30/40/50) → `rules/items.toml`.
 4. **원작 UI** — `PACKGRP`의 화면 틀(메인·전투 640×400, 상태 창 512×320)과 삽화를 쓰는 원작 배치의 UI. **부분**:
    전투 화면 틀 → 원작 모드 `[presentation.battle_frame]`(캔버스 640×400), 메인 화면 틀 → `[presentation.camp_frame]`(캠프

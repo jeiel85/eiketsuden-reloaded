@@ -72,15 +72,25 @@ fn outcome(block: &BlockOut, record: usize, own_block: usize, any_goes_on: bool)
 fn summary(block: &BlockOut, text: bool) -> Vec<String> {
     let mut out = Vec::new();
     let all = || block.records.iter().flat_map(|r| &r.code);
+    // (A battle setup may load its map with a `battle_end` to it: `battles::loaded_battle_map`.)
+    let battle_maps: Vec<u16> = block
+        .records
+        .iter()
+        .flat_map(|r| {
+            r.code
+                .iter()
+                .filter_map(|c| crate::battles::loaded_battle_map(&r.trigger, &c.instr))
+        })
+        .collect();
     let maps: Vec<String> = all()
         .filter(|c| c.instr.mnemonic == "load_map")
-        .map(|c| map_label(get(c, "map")))
+        .map(|c| get(c, "map"))
+        .chain(battle_maps.iter().copied())
+        .map(map_label)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let battle_map = all()
-        .filter(|c| c.instr.mnemonic == "load_map")
-        .any(|c| get(c, "map") & 0xf000 == crate::battles::BATTLE_MAP);
+    let battle_map = !battle_maps.is_empty();
     let sets_up = all().any(|c| story::sets_up_battle(&c.instr));
     let kind = if battle_map && sets_up {
         "전투"
