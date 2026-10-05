@@ -171,6 +171,32 @@ impl<'a> StatusLayout<'a> {
     }
 }
 
+/// Where a tap counts towards the hidden command now ([`crate::secret`]): the lord's portrait,
+/// on their detail page, or on the status window while the lord is the chosen officer.
+///
+/// Input: the canvas, the pack's status window, the detail page open (`detail`), the chosen
+/// officer (`cursor`) and whether an officer of the army is the lord. Output: the portrait's
+/// rectangle, or `None` when no lord's portrait is on screen.
+///
+/// Why the status window too: the original counts taps on the lord's portrait of its status
+/// window, and the original mode shows that window, so that is where its players tap; before,
+/// only the detail page's portrait counted and those taps did nothing.
+fn secret_portrait(
+    canvas: Vec2,
+    status: Option<&StatusFrame>,
+    detail: Option<usize>,
+    cursor: usize,
+    is_lord: impl Fn(usize) -> bool,
+) -> Option<Rect> {
+    match (detail, status) {
+        (Some(i), _) => is_lord(i).then(|| portrait_rect(canvas)),
+        (None, Some(frame)) => {
+            is_lord(cursor).then(|| StatusLayout::new(frame, canvas).rect(frame.portrait))
+        }
+        (None, None) => None,
+    }
+}
+
 /// What a tap or key on the status window does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StatusAction {
@@ -751,16 +777,22 @@ impl OfficersScreen {
             }
             return true;
         }
-        // A tap on the lord's portrait on its detail page counts, until the command is enabled.
-        let lord_page = !enabled
-            && self.detail.is_some_and(|i| {
-                ctx.session
-                    .as_ref()
-                    .and_then(|s| s.campaign.roster.get(i))
-                    .and_then(|o| pack.officer(&o.id))
-                    .is_some_and(|d| d.lord)
-            });
-        if !lord_page || !ctx.input.tapped(portrait_rect(ctx.gfx.size())) {
+        // A tap on the lord's portrait counts, until the command is enabled.
+        let is_lord = |i: usize| {
+            ctx.session
+                .as_ref()
+                .and_then(|s| s.campaign.roster.get(i))
+                .and_then(|o| pack.officer(&o.id))
+                .is_some_and(|d| d.lord)
+        };
+        let target = secret_portrait(
+            ctx.gfx.size(),
+            pack.manifest.presentation.status_frame.as_ref(),
+            self.detail,
+            self.menu.cursor(),
+            is_lord,
+        );
+        if enabled || !target.is_some_and(|r| ctx.input.tapped(r)) {
             return false;
         }
         ctx.input.consume();
@@ -1166,6 +1198,36 @@ mod tests {
             Some((1, Dir::Right))
         );
         assert_eq!(ability_side(canvas, vec2(r.x - 5.0, r.center().y)), None);
+    }
+
+    /// The lord's portrait counts for the hidden command on the detail page and, in a pack
+    /// with the original's status window, on that window while the lord is chosen.
+    #[test]
+    fn the_lords_portrait_counts_on_the_status_window_too() {
+        let canvas = vec2(511.0, 322.0);
+        let lord = |i: usize| i == 0;
+        // The detail pages: the lord's only.
+        assert_eq!(
+            secret_portrait(canvas, None, Some(0), 0, lord),
+            Some(portrait_rect(canvas))
+        );
+        assert_eq!(secret_portrait(canvas, None, Some(1), 0, lord), None);
+        // The table of a pack without a status window shows no portrait.
+        assert_eq!(secret_portrait(canvas, None, None, 0, lord), None);
+        // The status window: its portrait, while the lord is the chosen officer.
+        let frame = status_frame();
+        let layout = StatusLayout::new(&frame, canvas);
+        let side = layout.rect(frame.portrait);
+        assert_eq!(
+            secret_portrait(canvas, Some(&frame), None, 0, lord),
+            Some(side)
+        );
+        assert_eq!(secret_portrait(canvas, Some(&frame), None, 2, lord), None);
+        // The portrait is no slot: a tap there did nothing on the window before.
+        assert_eq!(
+            status_tap(&layout, side.center(), 0, 10),
+            StatusAction::None
+        );
     }
 
     #[test]
