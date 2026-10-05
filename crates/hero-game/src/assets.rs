@@ -250,6 +250,29 @@ impl FileBatch {
 
 // ----- media store ---------------------------------------------------------------------------
 
+/// The cache key of the face variant of portrait `key` that the face setting does not show now:
+/// `slot_key` is the one it shows ([`Media::texture_slot`]).
+fn other_variant(key: &str, slot_key: &str) -> String {
+    if slot_key == key {
+        format!("{key}{PUBLIC_SUFFIX}")
+    } else {
+        key.to_string()
+    }
+}
+
+/// What is cached under `key` when it is loaded.
+///
+/// Input: the texture cache and a cache key. Output: the cached value, `None` unless ready.
+///
+/// Why: right after the face setting changes, the new variant is still loading; showing the
+/// variant drawn until then avoids a frame of silhouettes, and nothing is requested for it.
+fn ready_variant<T: Clone>(textures: &HashMap<String, Slot<T>>, key: &str) -> Option<T> {
+    match textures.get(key) {
+        Some(Slot::Ready(t)) => Some(t.clone()),
+        _ => None,
+    }
+}
+
 /// Load state of a media key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetState {
@@ -450,14 +473,23 @@ impl Media {
     }
 
     /// Portrait `portraits/<key>`, falling back to `portraits/_unknown`. `None` while loading or
-    /// when neither exists (draw a procedural silhouette then).
+    /// when neither exists (draw a procedural silhouette then). While the face setting's
+    /// variant loads, the other one is shown if it is loaded ([`ready_variant`]).
     pub fn portrait(&self, key: &str) -> Option<Texture2D> {
         let full = format!("portraits/{key}");
         match self.texture_state(&full) {
             AssetState::Ready => self.texture(&full),
-            AssetState::Loading => None,
+            AssetState::Loading => self.other_face(&full),
             AssetState::Missing => self.texture(UNKNOWN_PORTRAIT),
         }
+    }
+
+    /// For portrait texture `key` (`portraits/…`) that is still loading: its other face variant
+    /// when that one is loaded (what was shown before the face setting changed), else `None`.
+    /// Requests nothing.
+    pub fn other_face(&self, key: &str) -> Option<Texture2D> {
+        let other = other_variant(key, &self.texture_slot(key));
+        ready_variant(&self.inner.borrow().textures, &other)
     }
 
     fn request_sound(&self, key: &str) -> AssetState {
@@ -1091,6 +1123,28 @@ mod tests {
         plain.set_public_portraits(true);
         plain.texture_state("portraits/liu_bei");
         assert_eq!(jobs(&plain)[0].0, "portraits/liu_bei");
+    }
+
+    /// While the face setting's variant of a portrait loads, the other variant is shown if it
+    /// is ready, so switching the setting does not flash silhouettes.
+    #[test]
+    fn the_other_face_stays_while_the_chosen_one_loads() {
+        let key = "portraits/liu_bei";
+        let public = format!("{key}{PUBLIC_SUFFIX}");
+        assert_eq!(other_variant(key, &public), key);
+        assert_eq!(other_variant(key, key), public);
+        let mut textures: HashMap<String, Slot<u32>> = HashMap::new();
+        textures.insert(key.to_string(), Slot::Ready(7));
+        textures.insert(public.clone(), Slot::Loading);
+        assert_eq!(
+            ready_variant(&textures, &other_variant(key, &public)),
+            Some(7)
+        );
+        // Nothing loaded yet: the silhouette, as before.
+        textures.insert(key.to_string(), Slot::Loading);
+        assert_eq!(ready_variant(&textures, key), None);
+        textures.insert(key.to_string(), Slot::Missing);
+        assert_eq!(ready_variant(&textures, key), None);
     }
 
     #[test]

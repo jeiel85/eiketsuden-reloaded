@@ -9,7 +9,8 @@
 //!
 //! A campaign started with 능력치 자유 조정 (DECISIONS D25) edits 무력/지력/통솔 on the detail page:
 //! confirm (or a tap on the abilities) starts editing, up and down pick one, left and right (or
-//! tapping its left or right half) change it by 1, confirm or cancel ends.
+//! pressing its left or right half) change it by 1, held by 5 after a second and by 10 after
+//! two ([`edit_step`]), confirm or cancel ends.
 
 use super::stats::officer_stats;
 use super::widgets::{back_button, back_tapped, content_rect, draw_back_button, help_y};
@@ -21,7 +22,7 @@ use super::widgets::{
 use crate::app::{Ctx, Enter, Screen, Transition};
 use crate::audio::sfx;
 use crate::gfx::{fill_rect, Align, FontId, TextStyle};
-use crate::input::Dir;
+use crate::input::{Dir, KeyRepeat};
 use crate::secret::SecretStep;
 use crate::ui::art::draw_portrait_card;
 use crate::ui::bars::{draw_gauge, draw_gauge_labeled, GaugeKind};
@@ -68,6 +69,37 @@ fn ability_rect(canvas: Vec2, i: usize) -> Rect {
     let by = panel.y + 8.0 + 120.0;
     // Wide enough for the ▶ drawn just right of the value.
     Rect::new(cx - 2.0, by - 2.0 + i as f32 * 14.0, 162.0, 14.0)
+}
+
+/// The ability row under `p` and the half of it: left lowers the value, right raises it.
+fn ability_side(canvas: Vec2, p: Vec2) -> Option<(usize, Dir)> {
+    (0..3)
+        .find(|&k| ability_rect(canvas, k).contains(p))
+        .map(|k| {
+            let side = if p.x < ability_rect(canvas, k).center().x {
+                Dir::Left
+            } else {
+                Dir::Right
+            };
+            (k, side)
+        })
+}
+
+/// How much one step changes an ability that has been stepped the same way for `held` seconds.
+///
+/// Input: seconds the key or press has been held. Output: 1, then 5 after 1 s, then 10 after
+/// 2 s.
+///
+/// Why grow the step instead of only repeating: the key repeat alone takes about 8 seconds from
+/// 1 to 100. Growing it keeps a short press exact and takes a held one there in about 2.
+fn edit_step(held: f32) -> i32 {
+    if held < 1.0 {
+        1
+    } else if held < 2.0 {
+        5
+    } else {
+        10
+    }
 }
 
 /// Where the detail page draws the officer's portrait.
@@ -183,6 +215,11 @@ pub struct OfficersScreen {
     prompt: Option<ConfirmDialog>,
     /// 능력치 자유 조정: the ability row being edited on the detail page.
     edit: Option<usize>,
+    /// The way the ability is being stepped (key or press held) and for how long, in seconds:
+    /// the step grows with it ([`edit_step`]).
+    edit_hold: (Option<Dir>, f32),
+    /// Repeat of a press held on an ability row: touch has no key repeat.
+    press_repeat: KeyRepeat,
 }
 
 impl Default for OfficersScreen {
@@ -198,6 +235,8 @@ impl OfficersScreen {
             detail: None,
             prompt: None,
             edit: None,
+            edit_hold: (None, 0.0),
+            press_repeat: KeyRepeat::default(),
         }
     }
 
@@ -792,16 +831,47 @@ impl OfficersScreen {
                 ctx.sfx(sfx::CANCEL);
             }
             self.edit = None;
+            self.edit_hold = (None, 0.0);
             return true;
         }
-        if let Some((k, p)) = tapped_row {
-            ctx.input.consume();
+        // A press on a row steps it at once and again while held, as a held key does; the tap
+        // that ends the press then does nothing more.
+        let pressed = ctx
+            .input
+            .pressed()
+            .then(|| ctx.input.pointer())
+            .flatten()
+            .and_then(|p| ability_side(canvas, p));
+        if let Some((k, _)) = pressed {
             self.edit = Some(k);
-            delta = if p.x < ability_rect(canvas, k).center().x {
-                -1
-            } else {
-                1
-            };
+        }
+        let row = self.edit.unwrap_or(row);
+        let input = &ctx.input;
+        let pressing = |d: Dir| {
+            input.down()
+                && input
+                    .pointer()
+                    .and_then(|p| ability_side(canvas, p))
+                    .is_some_and(|(k, side)| k == row && side == d)
+        };
+        let press_step = self
+            .press_repeat
+            .step(ctx.dt, pressed.map(|(_, d)| d), pressing);
+        let stepping = [Dir::Left, Dir::Right]
+            .into_iter()
+            .find(|&d| input.held(d) || pressing(d));
+        self.edit_hold = match self.edit_hold {
+            (way, t) if way == stepping && stepping.is_some() => (way, t + ctx.dt),
+            _ => (stepping, 0.0),
+        };
+        let step = edit_step(self.edit_hold.1);
+        let by = |d: Dir| if d == Dir::Left { -step } else { step };
+        if let Some(d) = press_step {
+            ctx.input.consume();
+            delta = by(d);
+        } else if tapped_row.is_some() {
+            ctx.input.consume();
+            return true;
         } else if ctx.input.tap().is_some() {
             // A tap anywhere else ends editing.
             ctx.input.consume();
@@ -812,8 +882,7 @@ impl OfficersScreen {
             match ctx.input.nav() {
                 Some(Dir::Up) => self.edit = Some((row + 2) % 3),
                 Some(Dir::Down) => self.edit = Some((row + 1) % 3),
-                Some(Dir::Left) => delta = -1,
-                Some(Dir::Right) => delta = 1,
+                Some(d @ (Dir::Left | Dir::Right)) => delta = by(d),
                 None => return true,
             }
             if delta == 0 {
@@ -932,7 +1001,7 @@ impl Screen for OfficersScreen {
                 draw_help(
                     ctx,
                     if self.edit.is_some() {
-                        "↑↓ 능력치 · ←→ 1씩 조정 · Z/X 조정 끝"
+                        "↑↓ 능력치 · ←→ 조정(길게: 빠르게) · Z/X 끝"
                     } else if campaign.free_edit {
                         "←→ 다른 무장 · Z 능력치 조정 · X 목록으로"
                     } else {
@@ -1059,6 +1128,44 @@ mod tests {
             status_tap(&layout, at(20.0, 70.0), 0, 0),
             StatusAction::None
         );
+    }
+
+    /// A short press steps by 1; a held one by 5 after a second and by 10 after two, so 1 to
+    /// 100 takes about two seconds of holding at the key repeat's rate.
+    #[test]
+    fn a_held_ability_steps_faster() {
+        assert_eq!(edit_step(0.0), 1);
+        assert_eq!(edit_step(0.99), 1);
+        assert_eq!(edit_step(1.0), 5);
+        assert_eq!(edit_step(2.0), 10);
+        // Stepped at the key repeat's timing from 1 upward.
+        let (mut value, mut t, mut steps) = (1, 0.0f32, 0);
+        let mut repeat = KeyRepeat::default();
+        let mut pressed = Some(Dir::Right);
+        while value < 100 {
+            if repeat.step(0.016, pressed.take(), |_| true).is_some() {
+                value = (value + edit_step(t)).min(100);
+                steps += 1;
+            }
+            t += 0.016;
+            assert!(t < 3.0, "still at {value} after {t} s");
+        }
+        assert!(steps < 30, "{steps} steps");
+    }
+
+    #[test]
+    fn a_press_on_an_ability_row_picks_the_way_by_its_half() {
+        let canvas = vec2(640.0, 400.0);
+        let r = ability_rect(canvas, 1);
+        assert_eq!(
+            ability_side(canvas, vec2(r.x + 2.0, r.center().y)),
+            Some((1, Dir::Left))
+        );
+        assert_eq!(
+            ability_side(canvas, vec2(r.right() - 2.0, r.center().y)),
+            Some((1, Dir::Right))
+        );
+        assert_eq!(ability_side(canvas, vec2(r.x - 5.0, r.center().y)), None);
     }
 
     #[test]

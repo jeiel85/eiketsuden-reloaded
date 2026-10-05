@@ -1757,91 +1757,11 @@ impl Screen for BattleScreen {
     }
 
     fn update(&mut self, ctx: &mut Ctx) -> Transition {
-        self.poll_meta(ctx);
+        let t = self.update_frame(ctx);
+        // After the frame's events and input: the tiles drawn this frame already follow the
+        // moves and arrivals the frame finished (before, they lagged one frame behind).
         self.refresh_danger(ctx);
-        let dt = ctx.dt;
-        self.pointer_rest = if ctx.input.pointer_moved() {
-            0.0
-        } else {
-            self.pointer_rest + dt
-        };
-        let speed = self.speed(ctx);
-        self.camera.update(dt);
-        self.scene.enhanced = ctx.settings.battle_fx == crate::settings::BattleFx::Enhanced;
-        self.scene.tick(dt * speed);
-        self.camera.shake = self.scene.shake_offset();
-
-        match &mut self.stage {
-            Stage::Title { age } => {
-                *age += dt;
-                let skip = *age > 0.4 && ctx.input.confirm();
-                if *age >= TITLE_SECONDS || skip {
-                    ctx.input.consume();
-                    if self.fresh {
-                        self.stage = Stage::Objective;
-                        ctx.sfx(sfx::CONFIRM);
-                    } else {
-                        self.stage = Stage::Battle;
-                        // Resumed mid-battle: announce whose phase it is.
-                        let ev = [BattleEvent::PhaseStart {
-                            side: self.state.phase,
-                            turn: self.state.turn,
-                        }];
-                        self.events
-                            .push(anim::plan(&ev, &self.state, &self.pack, &self.meta.fx));
-                    }
-                }
-                return Transition::None;
-            }
-            Stage::Objective => {
-                if ctx.input.confirm() || ctx.input.cancel() {
-                    ctx.input.consume();
-                    ctx.sfx(sfx::CONFIRM);
-                    self.begin_battle(ctx);
-                }
-                return Transition::None;
-            }
-            Stage::Result { .. } => {
-                if ctx.input.confirm() {
-                    ctx.input.consume();
-                    ctx.sfx(sfx::CONFIRM);
-                    return Transition::Flow(Flow::BattleEnded(Box::new(self.state.clone())));
-                }
-                return Transition::None;
-            }
-            Stage::Battle => {}
-        }
-
-        // Scenes a quick save left over: shown before the battle goes on (the overlay closing
-        // brings the screen back here for the next one).
-        if !self.queued_scenes.is_empty() {
-            return self.open_queued_scene(ctx);
-        }
-        // A batch whose last beat was a drama ran dry when the overlay closed (`resume`).
-        self.settle_events(ctx);
-        // Animations first; input waits until they are done.
-        if !self.events.is_idle() {
-            let skip = ctx.input.confirm();
-            let mut cues = std::mem::take(&mut self.cues);
-            self.events
-                .update(dt * speed, skip, &mut self.scene, &self.meta.fx, &mut cues);
-            self.cues = cues;
-            let t = self.handle_cues(ctx);
-            if skip {
-                ctx.input.consume();
-            }
-            self.settle_events(ctx);
-            return t;
-        }
-        if self.state.outcome.is_some() {
-            self.open_result();
-            return Transition::None;
-        }
-        if self.state.phase != Side::Player {
-            self.ai_update(ctx, dt * speed);
-            return Transition::None;
-        }
-        self.player_update(ctx, dt)
+        t
     }
 
     fn draw(&self, ctx: &Ctx) {
@@ -2043,6 +1963,96 @@ impl BattleScreen {
     }
 }
 
+impl BattleScreen {
+    /// One frame of [`Screen::update`], before the danger tiles are brought up to date.
+    fn update_frame(&mut self, ctx: &mut Ctx) -> Transition {
+        self.poll_meta(ctx);
+        let dt = ctx.dt;
+        self.pointer_rest = if ctx.input.pointer_moved() {
+            0.0
+        } else {
+            self.pointer_rest + dt
+        };
+        let speed = self.speed(ctx);
+        self.camera.update(dt);
+        self.scene.enhanced = ctx.settings.battle_fx == crate::settings::BattleFx::Enhanced;
+        self.scene.tick(dt * speed);
+        self.camera.set_shake(self.scene.shake_offset());
+
+        match &mut self.stage {
+            Stage::Title { age } => {
+                *age += dt;
+                let skip = *age > 0.4 && ctx.input.confirm();
+                if *age >= TITLE_SECONDS || skip {
+                    ctx.input.consume();
+                    if self.fresh {
+                        self.stage = Stage::Objective;
+                        ctx.sfx(sfx::CONFIRM);
+                    } else {
+                        self.stage = Stage::Battle;
+                        // Resumed mid-battle: announce whose phase it is.
+                        let ev = [BattleEvent::PhaseStart {
+                            side: self.state.phase,
+                            turn: self.state.turn,
+                        }];
+                        self.events
+                            .push(anim::plan(&ev, &self.state, &self.pack, &self.meta.fx));
+                    }
+                }
+                return Transition::None;
+            }
+            Stage::Objective => {
+                if ctx.input.confirm() || ctx.input.cancel() {
+                    ctx.input.consume();
+                    ctx.sfx(sfx::CONFIRM);
+                    self.begin_battle(ctx);
+                }
+                return Transition::None;
+            }
+            Stage::Result { .. } => {
+                if ctx.input.confirm() {
+                    ctx.input.consume();
+                    ctx.sfx(sfx::CONFIRM);
+                    return Transition::Flow(Flow::BattleEnded(Box::new(self.state.clone())));
+                }
+                return Transition::None;
+            }
+            Stage::Battle => {}
+        }
+
+        // Scenes a quick save left over: shown before the battle goes on (the overlay closing
+        // brings the screen back here for the next one).
+        if !self.queued_scenes.is_empty() {
+            return self.open_queued_scene(ctx);
+        }
+        // A batch whose last beat was a drama ran dry when the overlay closed (`resume`).
+        self.settle_events(ctx);
+        // Animations first; input waits until they are done.
+        if !self.events.is_idle() {
+            let skip = ctx.input.confirm();
+            let mut cues = std::mem::take(&mut self.cues);
+            self.events
+                .update(dt * speed, skip, &mut self.scene, &self.meta.fx, &mut cues);
+            self.cues = cues;
+            let t = self.handle_cues(ctx);
+            if skip {
+                ctx.input.consume();
+            }
+            self.settle_events(ctx);
+            return t;
+        }
+        if self.state.outcome.is_some() {
+            self.open_result();
+            return Transition::None;
+        }
+        if self.state.phase != Side::Player {
+            self.ai_update(ctx, dt * speed);
+            return Transition::None;
+        }
+        self.player_update(ctx, dt)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2072,6 +2082,7 @@ mod tests {
             bgm: None,
             terrain: BTreeMap::new(),
             backlog: Vec::new(),
+            fingerprint: None,
         }
     }
 

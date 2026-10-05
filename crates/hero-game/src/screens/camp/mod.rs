@@ -60,6 +60,11 @@ enum Command {
     Officers,
     Save,
     Load,
+    /// 순간 저장 (F5): for touch screens, which have no keys (the dialogue and battle menus have
+    /// it too).
+    QuickSave,
+    /// 순간 불러오기 (F9).
+    QuickLoad,
     Settings,
     Title,
 }
@@ -76,6 +81,8 @@ impl Command {
             Command::Officers => "무장 정보",
             Command::Save => "기록",
             Command::Load => "불러오기",
+            Command::QuickSave => "순간 저장",
+            Command::QuickLoad => "순간 불러오기",
             Command::Settings => "설정",
             Command::Title => "타이틀로",
         }
@@ -95,6 +102,8 @@ fn commands(has_battle: bool) -> Vec<Command> {
         Command::Officers,
         Command::Save,
         Command::Load,
+        Command::QuickSave,
+        Command::QuickLoad,
         Command::Settings,
         Command::Title,
     ]);
@@ -257,6 +266,8 @@ impl CampScreen {
             Command::Officers => "무장의 능력·책략·장비를 봅니다.".to_string(),
             Command::Save => "지금까지의 진행을 기록합니다.".to_string(),
             Command::Load => "기록을 불러옵니다.".to_string(),
+            Command::QuickSave => "지금 진행을 순간 저장 칸에 기록합니다 (F5).".to_string(),
+            Command::QuickLoad => "순간 저장을 불러옵니다 (F9).".to_string(),
             Command::Settings => "음량, 글자 속도 등을 바꿉니다.".to_string(),
             Command::Title => "타이틀 화면으로 돌아갑니다.".to_string(),
         }
@@ -302,6 +313,8 @@ impl CampScreen {
                 None => Transition::None,
             },
             Command::Load => Transition::push(SaveLoadScreen::load(&pack.manifest.id)),
+            Command::QuickSave => Transition::QuickSave,
+            Command::QuickLoad => Transition::QuickLoad,
             Command::Settings => Transition::push(SettingsScreen::new()),
             Command::Title => {
                 self.popup = Popup::Confirm(
@@ -662,6 +675,23 @@ mod tests {
         assert!(!without.contains(&Command::Deploy));
         assert_eq!(Command::Sortie.label(false), "다음으로");
         assert_eq!(with.len(), without.len() + 1);
+    }
+
+    /// With a battle the menu has 12 commands; on the smallest canvas they and the play time
+    /// under them still end above the help bar (ROADMAP M7-1).
+    #[test]
+    fn the_whole_menu_fits_the_smallest_canvas() {
+        let mut camp = CampScreen::new("", &[], Some("p1_sishui"));
+        assert_eq!(camp.commands.len(), 12);
+        assert!(camp.commands.contains(&Command::QuickSave));
+        assert!(camp.commands.contains(&Command::QuickLoad));
+        camp.rebuild();
+        let m = camp.menu.rect();
+        let play_time_bottom = m.bottom() + 6.0 + FontId::Small.line_height();
+        assert!(
+            play_time_bottom <= help_y(crate::gfx::DEFAULT_CANVAS.y),
+            "{play_time_bottom}"
+        );
     }
 
     #[test]

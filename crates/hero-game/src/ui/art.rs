@@ -255,7 +255,11 @@ pub enum PortraitArt {
 pub fn portrait_art(ctx: &Ctx, key: &str) -> PortraitArt {
     let own = format!("portraits/{key}");
     match ctx.media.texture_state(&own) {
-        AssetState::Loading => PortraitArt::Loading,
+        // Right after the face setting changed: the face shown until then, while the new loads.
+        AssetState::Loading => ctx
+            .media
+            .other_face(&own)
+            .map_or(PortraitArt::Loading, PortraitArt::Ready),
         AssetState::Ready => ctx
             .media
             .texture(&own)
