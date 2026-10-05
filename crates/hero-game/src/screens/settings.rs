@@ -24,6 +24,8 @@ enum Row {
     TextSpeed,
     BattleSpeed,
     Fullscreen,
+    /// The quick save slot of F5 / F9 and the menus' 순간 저장 (also F6).
+    QuickSlot,
     Portraits,
     DangerRange,
     BattleFx,
@@ -51,7 +53,12 @@ impl SettingsScreen {
         if crate::platform::can_toggle_fullscreen() {
             rows.push(Row::Fullscreen);
         }
-        rows.extend([Row::Portraits, Row::DangerRange, Row::BattleFx]);
+        rows.extend([
+            Row::QuickSlot,
+            Row::Portraits,
+            Row::DangerRange,
+            Row::BattleFx,
+        ]);
         rows.push(Row::Defaults);
         rows.push(Row::Back);
         SettingsScreen {
@@ -85,6 +92,9 @@ impl SettingsScreen {
                     .adjustable(),
                 Row::Fullscreen => MenuItem::new("전체 화면")
                     .detail(if s.fullscreen { "켬" } else { "끔" })
+                    .adjustable(),
+                Row::QuickSlot => MenuItem::new("순간 저장 칸")
+                    .detail(format!("{} / {}", s.quick_slot, crate::saves::QUICK_SLOTS))
                     .adjustable(),
                 Row::Portraits if !faces => MenuItem::new("얼굴")
                     .detail("원작 데이터 없음")
@@ -122,6 +132,10 @@ impl SettingsScreen {
                 s.fullscreen = !s.fullscreen;
                 // Fullscreen switches right away; the rest is persisted on leaving.
                 ctx.commit_settings();
+            }
+            Row::QuickSlot => {
+                let slots: Vec<u8> = (1..=crate::saves::QUICK_SLOTS).collect();
+                s.quick_slot = cycle(&slots, s.quick_slot, delta);
             }
             Row::Portraits => s.portraits = cycle(&PortraitStyle::ALL, s.portraits, delta),
             Row::DangerRange => s.danger_range = !s.danger_range,
@@ -162,17 +176,7 @@ impl Screen for SettingsScreen {
 
     fn on_enter(&mut self, ctx: &mut Ctx, _how: crate::app::Enter) {
         let items = self.items(&ctx.settings, ctx.data_root.has_original_layer());
-        let mut menu = Menu::new(items);
-        menu.framed = false;
-        let h = menu.rect().h;
-        let canvas = ctx.gfx.size();
-        // The window (menu plus its heading) is centred on the canvas.
-        menu.set_position(
-            ((canvas.x - WIDTH) / 2.0).round() + 6.0,
-            ((canvas.y - h) / 2.0).round() + 10.0,
-        );
-        menu.set_width(WIDTH - 12.0);
-        self.menu = menu;
+        self.menu = placed(items, ctx.gfx.size());
     }
 
     fn update(&mut self, ctx: &mut Ctx) -> Transition {
@@ -205,8 +209,7 @@ impl Screen for SettingsScreen {
     fn draw(&self, ctx: &Ctx) {
         let canvas = ctx.gfx.size();
         fill_rect(ctx.gfx.screen(), Color::new(0.0, 0.0, 0.02, 0.55));
-        let m = self.menu.rect();
-        let frame = Rect::new(m.x - 6.0, m.y - 26.0, WIDTH, m.h + 32.0);
+        let frame = window_rect(self.menu.rect());
         draw_window(frame);
         ctx.gfx.text_aligned(
             "설정",
@@ -230,9 +233,65 @@ impl Screen for SettingsScreen {
     }
 }
 
+/// The settings menu of `items` on a `canvas`: the window (menu plus its heading, see
+/// [`window_rect`]) centred on it.
+fn placed(items: Vec<MenuItem>, canvas: Vec2) -> Menu {
+    let mut menu = Menu::new(items);
+    menu.framed = false;
+    let h = menu.rect().h;
+    menu.set_position(
+        ((canvas.x - WIDTH) / 2.0).round() + 6.0,
+        ((canvas.y - h) / 2.0).round() + 10.0,
+    );
+    menu.set_width(WIDTH - 12.0);
+    menu
+}
+
+/// The window drawn around the settings menu `m`, with its heading.
+fn window_rect(m: Rect) -> Rect {
+    Rect::new(m.x - 6.0, m.y - 26.0, WIDTH, m.h + 32.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With every row (the native build's fullscreen and the quick save slot), the window and
+    /// the storage line under it still fit the smallest canvas.
+    #[test]
+    fn every_row_fits_the_smallest_canvas() {
+        let mut screen = SettingsScreen::new();
+        if !screen.rows.contains(&Row::Fullscreen) {
+            screen.rows.insert(5, Row::Fullscreen);
+        }
+        assert!(screen.rows.contains(&Row::QuickSlot));
+        let canvas = crate::gfx::DEFAULT_CANVAS;
+        let menu = placed(screen.items(&Settings::default(), true), canvas);
+        let window = window_rect(menu.rect());
+        assert!(window.y >= 0.0, "{window:?}");
+        // The storage line takes the last 16 pixels.
+        assert!(window.bottom() <= canvas.y - 16.0, "{window:?}");
+    }
+
+    /// The quick save slot row steps through the slots, wrapping.
+    #[test]
+    fn the_quick_slot_row_shows_and_steps_the_slot() {
+        let screen = SettingsScreen::new();
+        let at = screen
+            .rows
+            .iter()
+            .position(|&r| r == Row::QuickSlot)
+            .unwrap();
+        let mut s = Settings::default();
+        assert_eq!(screen.items(&s, true)[at].detail.as_deref(), Some("1 / 4"));
+        let slots: Vec<u8> = (1..=crate::saves::QUICK_SLOTS).collect();
+        assert_eq!(cycle(&slots, 1, -1), 4);
+        s.next_quick_slot();
+        assert_eq!(s.quick_save_slot(), crate::saves::SaveSlot::Quick(2));
+        s.quick_slot = 4;
+        s.next_quick_slot();
+        assert_eq!(s.quick_slot, 1);
+    }
 
     #[test]
     fn the_face_row_is_disabled_without_an_original_layer() {

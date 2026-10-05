@@ -1,5 +1,5 @@
-//! Save slots on top of the [`KeyValueStore`]: one autosave slot, one quick save slot (F5 / F9,
-//! see [`crate::quicksave`]) and [`MANUAL_SLOTS`] manual slots per data pack, each holding one
+//! Save slots on top of the [`KeyValueStore`]: one autosave slot, [`QUICK_SLOTS`] quick save
+//! slots (F5 / F9, see [`crate::quicksave`]) and [`MANUAL_SLOTS`] manual slots per data pack, each holding one
 //! [`SaveGame`] JSON document (`hero_core::save`).
 //!
 //! Every pack has its own set of slots (the storage key contains the pack id, see
@@ -18,29 +18,33 @@ use std::fmt;
 /// Number of manual save slots.
 pub const MANUAL_SLOTS: u8 = 8;
 
+/// Number of quick save slots; F5 and F9 use the one chosen in the settings
+/// (`Settings::quick_slot`).
+pub const QUICK_SLOTS: u8 = 4;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SaveSlot {
     /// Written automatically when the campaign advances.
     Auto,
     /// Written by the quick save key at any moment, including in the middle of a scene or a
-    /// battle animation; there is only this one.
-    Quick,
+    /// battle animation: `1..=QUICK_SLOTS`, the one chosen in the settings.
+    Quick(u8),
     /// Player-chosen slot, `1..=MANUAL_SLOTS`.
     Manual(u8),
 }
 
 impl SaveSlot {
-    /// Every slot in display order: the autosave, the quick save, then the manual slots.
+    /// Every slot in display order: the autosave, the quick saves, then the manual slots.
     pub fn all() -> impl Iterator<Item = SaveSlot> {
-        [SaveSlot::Auto, SaveSlot::Quick]
-            .into_iter()
+        std::iter::once(SaveSlot::Auto)
+            .chain((1..=QUICK_SLOTS).map(SaveSlot::Quick))
             .chain((1..=MANUAL_SLOTS).map(SaveSlot::Manual))
     }
 
     /// Slots the game writes by itself (or by a key): the slot list shows them but does not
     /// write into them.
     pub fn is_system(self) -> bool {
-        matches!(self, SaveSlot::Auto | SaveSlot::Quick)
+        matches!(self, SaveSlot::Auto | SaveSlot::Quick(_))
     }
 
     /// Storage key of the slot for the pack `pack_id`.
@@ -64,7 +68,7 @@ impl SaveSlot {
     /// slot did not exist then, so it has none.
     fn legacy_key(self) -> Option<String> {
         match self {
-            SaveSlot::Quick => None,
+            SaveSlot::Quick(_) => None,
             _ => Some(format!("save_{}", self.suffix())),
         }
     }
@@ -72,7 +76,10 @@ impl SaveSlot {
     fn suffix(self) -> String {
         match self {
             SaveSlot::Auto => "auto".into(),
-            SaveSlot::Quick => "quick".into(),
+            // The first keeps the key of the single quick slot there was before, so that save
+            // is quick slot 1 now.
+            SaveSlot::Quick(1) => "quick".into(),
+            SaveSlot::Quick(n) => format!("quick{n}"),
             SaveSlot::Manual(n) => n.to_string(),
         }
     }
@@ -81,20 +88,21 @@ impl SaveSlot {
     pub fn name(self) -> String {
         match self {
             SaveSlot::Auto => "자동 기록".into(),
-            SaveSlot::Quick => "순간 저장".into(),
+            SaveSlot::Quick(n) => format!("순간 저장 {n}"),
             SaveSlot::Manual(n) => format!("기록 {n}"),
         }
     }
 
     fn is_valid(self) -> bool {
         match self {
-            SaveSlot::Auto | SaveSlot::Quick => true,
+            SaveSlot::Auto => true,
+            SaveSlot::Quick(n) => (1..=QUICK_SLOTS).contains(&n),
             SaveSlot::Manual(n) => (1..=MANUAL_SLOTS).contains(&n),
         }
     }
 }
 
-/// Longest pack id that is used verbatim in a storage key (`save_` + id + `_quick`, the longest
+/// Longest pack id that is used verbatim in a storage key (`save_` + id + `_quick4`, the longest
 /// slot suffix, stays within the 64-byte key limit of `platform::storage`).
 pub const MAX_PLAIN_PACK_ID: usize = 50;
 
@@ -304,7 +312,7 @@ pub fn migrate_legacy(
     Ok(moved)
 }
 
-/// Which slot wins when two saves carry the same `saved_at`: the quick save, then the autosave,
+/// Which slot wins when two saves carry the same `saved_at`: the quick saves, then the autosave,
 /// then the manual slots (each group in list order).
 ///
 /// Why: `saved_at` counts whole seconds, so saves made within one second tie. The quick save is
@@ -313,7 +321,7 @@ pub fn migrate_legacy(
 /// be ignored by 이어하기 right after an autosave, which is when it is most often made.
 fn tie_rank(slot: SaveSlot) -> u8 {
     match slot {
-        SaveSlot::Quick => 0,
+        SaveSlot::Quick(_) => 0,
         SaveSlot::Auto => 1,
         SaveSlot::Manual(_) => 2,
     }
@@ -394,11 +402,17 @@ mod tests {
     #[test]
     fn slots_and_keys() {
         let all: Vec<_> = SaveSlot::all().collect();
-        assert_eq!(all.len(), 2 + MANUAL_SLOTS as usize);
+        assert_eq!(all.len(), 1 + QUICK_SLOTS as usize + MANUAL_SLOTS as usize);
         assert_eq!(all[0], SaveSlot::Auto);
-        assert_eq!(all[1], SaveSlot::Quick);
-        assert_eq!(SaveSlot::Quick.key("base"), "save_base_quick");
-        assert!(SaveSlot::Quick.is_system() && SaveSlot::Auto.is_system());
+        assert_eq!(all[1..5], (1..=4).map(SaveSlot::Quick).collect::<Vec<_>>());
+        // The first quick slot keeps the key of the single quick slot there was before.
+        assert_eq!(SaveSlot::Quick(1).key("base"), "save_base_quick");
+        assert_eq!(SaveSlot::Quick(4).key("base"), "save_base_quick4");
+        assert_eq!(SaveSlot::Quick(2).name(), "순간 저장 2");
+        assert!(SaveSlot::Quick(3).is_system() && SaveSlot::Auto.is_system());
+        // The longest key a verbatim pack id makes stays within the storage's limit.
+        let longest = "a".repeat(MAX_PLAIN_PACK_ID);
+        assert!(SaveSlot::Quick(QUICK_SLOTS).key(&longest).len() <= 64);
         assert!(!SaveSlot::Manual(1).is_system());
         assert_eq!(SaveSlot::Manual(3).key("base"), "save_base_3");
         assert_eq!(SaveSlot::Auto.key("base"), "save_base_auto");
@@ -406,6 +420,10 @@ mod tests {
         assert_eq!(
             write(&mut store, SaveSlot::Manual(9), &save("x", 1, "base")),
             Err(SaveSlotError::InvalidSlot(SaveSlot::Manual(9)))
+        );
+        assert_eq!(
+            write(&mut store, SaveSlot::Quick(5), &save("x", 1, "base")),
+            Err(SaveSlotError::InvalidSlot(SaveSlot::Quick(5)))
         );
     }
 
@@ -476,16 +494,17 @@ mod tests {
         ));
 
         let infos = list(&store, "base");
-        assert_eq!(infos.len(), 10);
+        assert_eq!(infos.len(), 13);
         assert_eq!(infos[0].summary().unwrap().label, "자동");
         assert_eq!(infos[0].summary().unwrap().play_seconds, 3600);
-        // Index 1 is the quick save slot, 2.. the manual slots.
-        assert_eq!(infos[1].slot, SaveSlot::Quick);
+        // Indexes 1–4 are the quick save slots, 5.. the manual slots.
+        assert_eq!(infos[1].slot, SaveSlot::Quick(1));
         assert_eq!(infos[1].status, SlotStatus::Empty);
-        assert_eq!(infos[2].status, SlotStatus::Empty);
+        assert_eq!(infos[5].slot, SaveSlot::Manual(1));
+        assert_eq!(infos[5].status, SlotStatus::Empty);
         // The other pack's save lives in the other pack's slots.
-        assert_eq!(infos[6].status, SlotStatus::Empty);
-        assert!(matches!(infos[8].status, SlotStatus::Unreadable(_)));
+        assert_eq!(infos[9].status, SlotStatus::Empty);
+        assert!(matches!(infos[11].status, SlotStatus::Unreadable(_)));
         assert_eq!(
             read(&store, SaveSlot::Manual(5), "other").unwrap().label,
             "다른 팩"
@@ -613,25 +632,53 @@ mod tests {
         );
     }
 
-    /// The quick save is one more slot: 이어하기 (`latest`) takes it when it is the newest, and
-    /// never touches the slots of other packs or the pre-split legacy keys.
+    /// Each quick save slot is its own slot: 이어하기 (`latest`) takes the newest of them, and
+    /// they never touch each other, the slots of other packs or the pre-split legacy keys.
+    #[test]
+    fn the_quick_slots_are_their_own_slots() {
+        let mut store = MemoryStore::default();
+        write(&mut store, SaveSlot::Quick(1), &save("하나", 100, "base")).unwrap();
+        write(&mut store, SaveSlot::Quick(3), &save("셋", 300, "base")).unwrap();
+        assert_eq!(
+            read(&store, SaveSlot::Quick(1), "base").unwrap().label,
+            "하나"
+        );
+        assert_eq!(
+            read(&store, SaveSlot::Quick(3), "base").unwrap().label,
+            "셋"
+        );
+        assert!(matches!(
+            read(&store, SaveSlot::Quick(2), "base"),
+            Err(SaveSlotError::Empty(SaveSlot::Quick(2)))
+        ));
+        assert_eq!(latest(&store, "base"), Some(SaveSlot::Quick(3)));
+    }
+
     #[test]
     fn the_quick_slot_is_its_own_slot() {
         let mut store = MemoryStore::default();
         write(&mut store, SaveSlot::Auto, &save("자동", 100, "base")).unwrap();
-        write(&mut store, SaveSlot::Quick, &save("순간", 200, "base")).unwrap();
+        write(&mut store, SaveSlot::Quick(1), &save("순간", 200, "base")).unwrap();
         write(&mut store, SaveSlot::Manual(1), &save("수동", 150, "base")).unwrap();
-        write(&mut store, SaveSlot::Quick, &save("다른 팩", 900, "other")).unwrap();
+        write(
+            &mut store,
+            SaveSlot::Quick(1),
+            &save("다른 팩", 900, "other"),
+        )
+        .unwrap();
 
-        assert_eq!(read(&store, SaveSlot::Quick, "base").unwrap().label, "순간");
+        assert_eq!(
+            read(&store, SaveSlot::Quick(1), "base").unwrap().label,
+            "순간"
+        );
         assert_eq!(read(&store, SaveSlot::Auto, "base").unwrap().label, "자동");
-        assert_eq!(latest(&store, "base"), Some(SaveSlot::Quick));
-        assert_eq!(latest(&store, "other"), Some(SaveSlot::Quick));
+        assert_eq!(latest(&store, "base"), Some(SaveSlot::Quick(1)));
+        assert_eq!(latest(&store, "other"), Some(SaveSlot::Quick(1)));
 
-        delete(&mut store, SaveSlot::Quick, "base").unwrap();
+        delete(&mut store, SaveSlot::Quick(1), "base").unwrap();
         assert_eq!(latest(&store, "base"), Some(SaveSlot::Manual(1)));
         assert_eq!(
-            read(&store, SaveSlot::Quick, "other").unwrap().label,
+            read(&store, SaveSlot::Quick(1), "other").unwrap().label,
             "다른 팩"
         );
 
@@ -658,8 +705,8 @@ mod tests {
         let mut store = MemoryStore::default();
         write(&mut store, SaveSlot::Manual(1), &save("수동", 50, "base")).unwrap();
         write(&mut store, SaveSlot::Auto, &save("자동", 50, "base")).unwrap();
-        write(&mut store, SaveSlot::Quick, &save("순간", 50, "base")).unwrap();
-        assert_eq!(latest(&store, "base"), Some(SaveSlot::Quick));
+        write(&mut store, SaveSlot::Quick(1), &save("순간", 50, "base")).unwrap();
+        assert_eq!(latest(&store, "base"), Some(SaveSlot::Quick(1)));
 
         // Only a tie: an older quick save loses to a newer autosave.
         write(&mut store, SaveSlot::Auto, &save("자동", 51, "base")).unwrap();

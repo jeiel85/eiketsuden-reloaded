@@ -1,7 +1,8 @@
 //! Quick save (순간 저장): **F5** saves and **F9** loads, at any moment — in the middle of a
 //! conversation, a choice, a battle animation or an enemy phase — like the suspend point of an
-//! emulator. The save goes to its own slot ([`SaveSlot::Quick`]) so it never replaces the
-//! autosave or a manual save; 이어하기 on the title screen picks whichever save is newest.
+//! emulator. The save goes to a slot of its own ([`saves::SaveSlot::Quick`], the one chosen in the
+//! settings: **F6** steps through them) so it never replaces the autosave or a manual save;
+//! 이어하기 on the title screen picks whichever save is newest.
 //!
 //! # How a moment is saved
 //!
@@ -21,7 +22,7 @@
 
 use crate::app::{Ctx, Screen};
 use crate::flow::{save_label, Session};
-use crate::saves::{self, SaveSlot};
+use crate::saves;
 use hero_core::battle::BattleState;
 use hero_core::pack::Pack;
 use hero_core::save::{ResumeError, SaveGame, SceneResume};
@@ -31,6 +32,8 @@ use macroquad::prelude::KeyCode;
 pub const SAVE_KEY: KeyCode = KeyCode::F5;
 /// Key that quick loads.
 pub const LOAD_KEY: KeyCode = KeyCode::F9;
+/// Key that picks the next quick save slot.
+pub const SLOT_KEY: KeyCode = KeyCode::F6;
 
 /// What one screen of the stack says about where the game is (see [`Screen::resume_point`]).
 #[derive(Debug, Clone)]
@@ -103,7 +106,8 @@ pub fn save(ctx: &mut Ctx, stack: &[Box<dyn Screen>]) -> Result<(), String> {
     };
     let points = stack.iter().filter_map(|s| s.resume_point(ctx)).collect();
     let save = snapshot(&pack, session, points).map_err(str::to_string)?;
-    saves::write(ctx.storage.as_mut(), SaveSlot::Quick, &save).map_err(|e| e.to_string())
+    let slot = ctx.settings.quick_save_slot();
+    saves::write(ctx.storage.as_mut(), slot, &save).map_err(|e| e.to_string())
 }
 
 /// Input: the context. Output: the quick save of the loaded pack that can be played, or a
@@ -113,8 +117,12 @@ pub fn read(ctx: &Ctx) -> Result<SaveGame, String> {
     let (Some(pack), Some(pack_id)) = (ctx.pack.as_deref(), ctx.pack_id()) else {
         return Err("데이터 팩이 로드되지 않았습니다".into());
     };
-    let save =
-        saves::read(ctx.storage.as_ref(), SaveSlot::Quick, pack_id).map_err(|e| e.to_string())?;
+    let save = saves::read(
+        ctx.storage.as_ref(),
+        ctx.settings.quick_save_slot(),
+        pack_id,
+    )
+    .map_err(|e| e.to_string())?;
     playable(pack, &save)?;
     Ok(save)
 }

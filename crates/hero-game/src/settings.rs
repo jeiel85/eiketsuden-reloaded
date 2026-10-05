@@ -155,6 +155,9 @@ pub struct Settings {
     pub danger_range: bool,
     /// X5: enhanced hit presentation in battle.
     pub battle_fx: BattleFx,
+    /// The quick save slot F5 and F9 use, `1..=saves::QUICK_SLOTS` (changed with F6 or in the
+    /// settings screen).
+    pub quick_slot: u8,
 }
 
 impl Default for Settings {
@@ -171,6 +174,7 @@ impl Default for Settings {
             portraits: PortraitStyle::Original,
             danger_range: false,
             battle_fx: BattleFx::Original,
+            quick_slot: 1,
         }
     }
 }
@@ -213,7 +217,18 @@ impl Settings {
             self.original_dir = None;
         }
         self.original_mode &= self.original_dir.is_some();
+        self.quick_slot = self.quick_slot.clamp(1, crate::saves::QUICK_SLOTS);
         self
+    }
+
+    /// The quick save slot F5 and F9 use.
+    pub fn quick_save_slot(&self) -> crate::saves::SaveSlot {
+        crate::saves::SaveSlot::Quick(self.quick_slot.clamp(1, crate::saves::QUICK_SLOTS))
+    }
+
+    /// The next quick save slot after the current one, wrapping (F6).
+    pub fn next_quick_slot(&mut self) {
+        self.quick_slot = self.quick_slot % crate::saves::QUICK_SLOTS + 1;
     }
 
     /// The original-mode folder to convert at launch, when the original mode is on.
