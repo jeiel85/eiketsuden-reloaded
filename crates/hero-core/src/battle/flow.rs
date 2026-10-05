@@ -28,9 +28,7 @@ impl BattleState {
             return ev;
         }
         if let Some(scene) = &self.def(pack).intro {
-            ev.push(BattleEvent::Drama {
-                scene: scene.clone(),
-            });
+            ev.push(self.drama_event(pack, scene));
         }
         if !self.start_phase(pack, Side::Player, &mut ev) {
             self.end_phase(pack, &mut ev);
@@ -373,9 +371,7 @@ impl BattleState {
 
     fn run_action(&mut self, pack: &Pack, action: &EventAction, ev: &mut Vec<BattleEvent>) {
         match action {
-            EventAction::Drama { scene } => ev.push(BattleEvent::Drama {
-                scene: scene.clone(),
-            }),
+            EventAction::Drama { scene } => ev.push(self.drama_event(pack, scene)),
             EventAction::Spawn { group } => self.spawn_group(pack, group, ev),
             EventAction::SetAi {
                 target,
@@ -481,6 +477,17 @@ impl BattleState {
             EventAction::Defeat => {
                 if self.outcome.is_none() {
                     self.lose(DefeatReason::Event, ev);
+                }
+            }
+            EventAction::When {
+                when,
+                unless,
+                actions,
+            } => {
+                if self.flags_hold(when, unless) {
+                    for a in actions {
+                        self.run_action(pack, a, ev);
+                    }
                 }
             }
         }
@@ -627,9 +634,7 @@ impl BattleState {
         }
         ev.push(BattleEvent::Victory);
         if let Some(scene) = &def.outro {
-            ev.push(BattleEvent::Drama {
-                scene: scene.clone(),
-            });
+            ev.push(self.drama_event(pack, scene));
         }
     }
 

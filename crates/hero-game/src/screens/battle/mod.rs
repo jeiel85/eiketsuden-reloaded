@@ -490,7 +490,7 @@ impl BattleScreen {
         textures.extend(self.meta.picture.iter().cloned());
         textures.extend(self.frame.iter().map(|f| f.image.clone()));
         for e in &self.def().events {
-            for a in &e.actions {
+            for a in e.all_actions() {
                 if let EventAction::SetTerrain {
                     image: Some(key), ..
                 } = a
@@ -813,14 +813,22 @@ impl BattleScreen {
                     }
                 }
                 Cue::Terrain(pos) => self.show_terrain(pos),
-                Cue::Drama(scene) => out = self.open_drama(ctx, &scene),
+                Cue::Drama(scene, terrain) => out = self.open_drama(ctx, &scene, Some(terrain)),
             }
         }
         out
     }
 
     /// Show the drama scene `scene` over the battle.
-    fn open_drama(&mut self, ctx: &mut Ctx, scene: &str) -> Transition {
+    /// Show scene `scene` over the battle. `terrain`: the officers' terrain as the event that
+    /// plays it fired ([`BattleEvent::Drama`]); without it (a scene a quick save left queued,
+    /// or one without a duel), the terrain now.
+    fn open_drama(
+        &mut self,
+        ctx: &mut Ctx,
+        scene: &str,
+        terrain: Option<BTreeMap<String, String>>,
+    ) -> Transition {
         // The map stays drawn under the overlay without updates: never leave it shaken.
         self.scene.shake = 0.0;
         self.camera.shake = Vec2::ZERO;
@@ -835,7 +843,9 @@ impl BattleScreen {
             session.campaign.merge_battle_flags(&self.state);
         }
         self.waiting = Some(Waiting::Drama);
-        let terrain = officer_terrain(&self.pack, &self.state);
+        let terrain = terrain
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| self.state.officer_terrain(&self.pack));
         Transition::push(DramaScreen::battle_overlay(ctx, scene, terrain))
     }
 
@@ -847,7 +857,7 @@ impl BattleScreen {
                 self.waiting = Some(Waiting::Drama);
                 Transition::push(DramaScreen::restore(ctx, *resume))
             }
-            Some(QueuedScene::Fresh(scene)) => self.open_drama(ctx, &scene),
+            Some(QueuedScene::Fresh(scene)) => self.open_drama(ctx, &scene, None),
             None => Transition::None,
         }
     }
@@ -2033,33 +2043,6 @@ impl BattleScreen {
     }
 }
 
-/// The terrain id under each officer of `state` on the map, for the duels of its scenes
-/// (`@duel ... terrain`). Retreated officers count at their last cell, after the ones on the
-/// map: a duel's loser retreats in the actions of the same event, which have all been applied
-/// when its scene plays (one that retreated turns earlier counts too, a case the converted
-/// duels do not have).
-fn officer_terrain(pack: &Pack, state: &BattleState) -> BTreeMap<String, String> {
-    let mut terrain = BTreeMap::new();
-    for on_map in [true, false] {
-        for u in &state.units {
-            let wanted = if on_map {
-                u.is_active()
-            } else {
-                u.state == hero_core::battle::UnitState::Retreated
-            };
-            let (Some(officer), true) = (u.officer.as_ref(), wanted) else {
-                continue;
-            };
-            if let Some(t) = state.terrain_at(pack, u.pos) {
-                terrain
-                    .entry(officer.to_string())
-                    .or_insert_with(|| t.id.to_string());
-            }
-        }
-    }
-    terrain
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2141,9 +2124,11 @@ mod tests {
             &[
                 BattleEvent::Drama {
                     scene: "p1_duel".into(),
+                    terrain: BTreeMap::new(),
                 },
                 BattleEvent::Drama {
                     scene: "p1_outro".into(),
+                    terrain: BTreeMap::new(),
                 },
             ],
             &s.state,
@@ -2180,15 +2165,17 @@ mod tests {
                 .id
                 .to_string()
         };
-        let map = officer_terrain(&pack, &state);
+        let map = state.officer_terrain(&pack);
         assert_eq!(map[&name(officers[0])], under(&state, officers[0]));
         // Retreated by the event that plays the duel: still at their last cell.
         state.units[officers[1]].state = UnitState::Retreated;
-        let map = officer_terrain(&pack, &state);
+        let map = state.officer_terrain(&pack);
         assert_eq!(map[&name(officers[1])], under(&state, officers[1]));
         // Not yet on the map: not there.
         state.units[officers[1]].state = UnitState::Hidden;
-        assert!(!officer_terrain(&pack, &state).contains_key(&name(officers[1])));
+        assert!(!state
+            .officer_terrain(&pack)
+            .contains_key(&name(officers[1])));
     }
 
     /// The default (and smallest allowed), VGA and the largest allowed canvas.

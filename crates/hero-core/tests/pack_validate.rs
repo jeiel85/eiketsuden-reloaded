@@ -711,6 +711,34 @@ fn battle_logic_checks() {
             "battle b01 event #2",
             "plays unknown scene `b01_fight`",
         ),
+        // What a `when` action holds is checked as the event's own actions are.
+        error(
+            &[(
+                B01,
+                "{ type = \"spawn\", group = \"rein\" }",
+                "{ type = \"when\", when = [{ flag = \"b01_route\" }], actions = [{ type = \"spawn\", group = \"rain\" }] }",
+            )],
+            "battle b01 event #1",
+            "spawns group `rain`, but no unit belongs to it",
+        ),
+        error(
+            &[(
+                B01,
+                "{ type = \"spawn\", group = \"rein\" }",
+                "{ type = \"when\", actions = [{ type = \"spawn\", group = \"rein\" }, { type = \"drama\", scene = \"b01_fight\" }] }",
+            )],
+            "battle b01 event #1",
+            "plays unknown scene `b01_fight`",
+        ),
+        warning(
+            &[(
+                B01,
+                "{ type = \"spawn\", group = \"rein\" }",
+                "{ type = \"spawn\", group = \"rein\" }, { type = \"when\", actions = [] }",
+            )],
+            "battle b01 event #1",
+            "has a `when` action without actions",
+        ),
         error(
             &[(B01, "item = \"fire_scroll\"", "item = \"ice_scroll\"")],
             "battle b01 event #5",

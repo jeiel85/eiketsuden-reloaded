@@ -195,7 +195,10 @@ strategies impossible and water strategies deal +25%. Battles may override the c
   `once = true` (default). Actions run in order. A `drama` action emits `BattleEvent::Drama` for the frontend.
   `spawn` places every hidden unit of the group; if its tile is occupied or impassable for it, the nearest free
   passable tile (by manhattan distance, then row-major) is used. A `retreat` action on a hidden unit takes it out
-  of the battle (`Retreated`) without showing anything: a later `spawn` of its group does not bring it in.
+  of the battle (`Retreated`) without showing anything: a later `spawn` of its group does not bring it in. A
+  `when` action runs its own actions in place only while its flags allow (as an event's `when`/`unless`). A
+  `drama` action of a scene with a duel takes the terrain under each officer at that moment for the duel's
+  background, before the event's later actions (a `set_terrain`) run.
 * **Victory** when any `victory` condition holds; **defeat** when any `defeat` condition holds, the lord retreats, or
   the turn limit passes. A battle fought without the lord (the lord in `deploy.forbidden`: another troop's battle) is
   also lost when every player unit on the map has retreated. Checked after every action and phase change; victory is

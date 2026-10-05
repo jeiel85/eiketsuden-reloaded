@@ -323,6 +323,18 @@ pub enum EventAction {
         side: Side,
         stat: HalveStat,
     },
+    /// Run `actions` here, in the event's order, only while the flags allow, as an event's own
+    /// `when` and `unless` do: every `when` condition holds and not all of `unless`. For the
+    /// part of what an event does that depends on flags when it cannot be an event of its own
+    /// (the original's flag-guarded lines of a script played as the battle moves to its next
+    /// stage: an event after it would no longer be at its stage).
+    When {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        when: Vec<FlagCond>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unless: Vec<FlagCond>,
+        actions: Vec<EventAction>,
+    },
     Victory,
     Defeat,
 }
@@ -352,6 +364,13 @@ pub struct EventDef {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unless: Vec<FlagCond>,
     pub actions: Vec<EventAction>,
+}
+
+impl EventDef {
+    /// The event's actions with the nested ones ([`EventAction::all`]).
+    pub fn all_actions(&self) -> Vec<&EventAction> {
+        EventAction::all(&self.actions)
+    }
 }
 
 /// A condition on a flag: `flag <cmp> value`, with the flag's value as this battle's events set
@@ -469,6 +488,24 @@ impl Trigger {
 }
 
 impl EventAction {
+    /// Every action of `actions` with those inside [`EventAction::When`] after their `when`, in
+    /// order.
+    ///
+    /// Input: an event's actions. Output: them and the nested ones, depth first.
+    ///
+    /// Why one walk for all: what reads an event's actions (scenes to check, groups it brings
+    /// in, whether it wins the battle) must see a nested action as well as a top-level one.
+    pub fn all(actions: &[EventAction]) -> Vec<&EventAction> {
+        let mut out = Vec::new();
+        for a in actions {
+            out.push(a);
+            if let EventAction::When { actions, .. } = a {
+                out.extend(EventAction::all(actions));
+            }
+        }
+        out
+    }
+
     /// The units this action names.
     pub fn unit_refs(&self) -> Vec<UnitRef<'_>> {
         match self {
@@ -491,6 +528,9 @@ impl EventAction {
             | EventAction::Halve { .. }
             | EventAction::Victory
             | EventAction::Defeat => Vec::new(),
+            EventAction::When { actions, .. } => {
+                actions.iter().flat_map(EventAction::unit_refs).collect()
+            }
         }
     }
 }
@@ -508,6 +548,7 @@ impl BattleDef {
         for e in &self.events {
             refs.extend(e.trigger.unit_refs());
             refs.extend(e.actions.iter().flat_map(EventAction::unit_refs));
+            // (Nested actions are in their `when`'s refs.)
         }
         refs.extend(
             self.units

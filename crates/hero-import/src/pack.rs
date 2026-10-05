@@ -3293,7 +3293,7 @@ fn convert_battles(
                     .events
                     .iter()
                     .filter(|e| e.stage.is_none_or(|s| reached.contains(&s)))
-                    .flat_map(|e| &e.actions)
+                    .flat_map(|e| e.all_actions())
                     .filter_map(|a| match a {
                         hero_core::battledef::EventAction::SetStage { stage } => Some(*stage),
                         _ => None,
@@ -3319,13 +3319,13 @@ fn convert_battles(
                     .battle
                     .events
                     .iter()
-                    .flat_map(|e| &e.actions)
+                    .flat_map(|e| e.all_actions())
                     .filter_map(|a| match a {
                         hero_core::battledef::EventAction::Drama { scene } => Some(scene.as_str()),
                         _ => None,
                     })
                     .collect();
-                for action in dropped.iter().flat_map(|e| &e.actions) {
+                for action in dropped.iter().flat_map(|e| e.all_actions()) {
                     if let hero_core::battledef::EventAction::Drama { scene } = action {
                         if !played.contains(scene.as_str()) {
                             battles::remove_scene(&mut converted.drama, scene);
@@ -3373,7 +3373,7 @@ fn convert_battles(
                 .battle
                 .events
                 .iter()
-                .flat_map(|e| &e.actions)
+                .flat_map(|e| e.all_actions())
                 .any(|a| matches!(a, hero_core::battledef::EventAction::SetFlag { flag: f, .. } if *f == flag));
             if pairing.battle.is_empty()
                 && battles::events_end_battle(&original.records)
