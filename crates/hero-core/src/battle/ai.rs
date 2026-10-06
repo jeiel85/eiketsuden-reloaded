@@ -277,9 +277,10 @@ fn scripted_endings(st: &BattleState, pack: &Pack, me: &Unit) -> Vec<Scripted> {
         {
             continue;
         }
-        let wins = if e.actions.iter().any(|a| matches!(a, EventAction::Defeat)) {
+        let actions = st.active_actions(&e.actions);
+        let wins = if actions.iter().any(|a| matches!(a, EventAction::Defeat)) {
             false
-        } else if e.actions.iter().any(|a| matches!(a, EventAction::Victory)) {
+        } else if actions.iter().any(|a| matches!(a, EventAction::Victory)) {
             true
         } else {
             continue;

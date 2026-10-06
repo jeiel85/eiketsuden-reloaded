@@ -757,7 +757,7 @@ impl<'a> Validator<'a> {
         let other_win = b.victory.iter().any(|c| *c != Condition::DefeatAll)
             || b.events
                 .iter()
-                .flat_map(|e| &e.actions)
+                .flat_map(|e| e.all_actions())
                 .any(|a| matches!(a, EventAction::Victory));
         if let (Some(map), true, false) =
             (map, b.victory.contains(&Condition::DefeatAll), other_win)
@@ -777,7 +777,7 @@ impl<'a> Validator<'a> {
         let event_victory = b
             .events
             .iter()
-            .any(|e| e.actions.contains(&EventAction::Victory));
+            .any(|e| e.all_actions().contains(&&EventAction::Victory));
         if b.victory.is_empty() && !event_victory {
             self.error(&ctx, "no victory condition and no event grants victory");
         }
@@ -793,7 +793,7 @@ impl<'a> Validator<'a> {
             if e.actions.is_empty() {
                 self.warn(&ectx, "has no actions");
             }
-            for a in &e.actions {
+            for a in e.all_actions() {
                 if let EventAction::Spawn { group } = a {
                     spawned.insert(group);
                     if !groups.contains(group.as_str()) {
@@ -815,7 +815,7 @@ impl<'a> Validator<'a> {
         let stages: BTreeSet<u32> = b
             .events
             .iter()
-            .flat_map(|e| &e.actions)
+            .flat_map(|e| e.all_actions())
             .filter_map(|a| match a {
                 EventAction::SetStage { stage } => Some(*stage),
                 _ => None,
@@ -876,7 +876,7 @@ impl<'a> Validator<'a> {
         let pack = self.pack;
         let mut scenes: Vec<&str> = b.intro.iter().map(|s| s.as_str()).collect();
         for e in &b.events {
-            for a in &e.actions {
+            for a in e.all_actions() {
                 if let EventAction::Drama { scene } = a {
                     scenes.push(scene);
                 }
@@ -1251,7 +1251,7 @@ impl<'a> Validator<'a> {
         let changed: Vec<(Pos, &str)> = b
             .events
             .iter()
-            .flat_map(|e| &e.actions)
+            .flat_map(|e| e.all_actions())
             .filter_map(|a| match a {
                 EventAction::SetTerrain { pos, terrain, .. } => Some((*pos, terrain.as_str())),
                 _ => None,
@@ -1316,7 +1316,7 @@ impl<'a> Validator<'a> {
         let removed: BTreeSet<&str> = b
             .events
             .iter()
-            .flat_map(|e| &e.actions)
+            .flat_map(|e| e.all_actions())
             .filter_map(|a| match a {
                 EventAction::Retreat { target } => Some(target.as_str()),
                 _ => None,
@@ -1412,6 +1412,12 @@ impl<'a> Validator<'a> {
                 }
             }
             EventAction::Spawn { .. } => {} // checked against the battle's groups by the caller
+            // Its actions are checked one by one by the caller ([`EventAction::all`]).
+            EventAction::When { actions, .. } => {
+                if actions.is_empty() {
+                    self.warn(ctx, "has a `when` action without actions");
+                }
+            }
             EventAction::SetAi {
                 ai,
                 ai_target,
@@ -1570,7 +1576,7 @@ impl<'a> Validator<'a> {
             used.extend(b.intro.as_deref());
             used.extend(b.outro.as_deref());
             for e in &b.events {
-                for a in &e.actions {
+                for a in e.all_actions() {
                     if let EventAction::Drama { scene } = a {
                         used.insert(scene);
                     }
@@ -1799,9 +1805,17 @@ impl<'a> Validator<'a> {
         }
         for b in pack.battles.values() {
             for (i, e) in b.events.iter().enumerate() {
-                for a in &e.actions {
-                    if let EventAction::SetFlag { flag, .. } = a {
-                        set.insert(flag);
+                for a in e.all_actions() {
+                    match a {
+                        EventAction::SetFlag { flag, .. } => {
+                            set.insert(flag);
+                        }
+                        EventAction::When { when, unless, .. } => {
+                            for c in when.iter().chain(unless) {
+                                read.push((format!("battle {} event #{}", b.id, i + 1), &c.flag));
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 for c in e.when.iter().chain(&e.unless) {

@@ -435,8 +435,9 @@ pub enum Cue {
     PhaseMusic(Side),
     /// Victory (`true`) or defeat jingle.
     Jingle(bool),
-    /// Play a drama scene as an overlay; the queue waits for [`EventPlayer::resume`].
-    Drama(String),
+    /// Play a drama scene as an overlay, with the officers' terrain as it began
+    /// ([`BattleEvent::Drama`]); the queue waits for [`EventPlayer::resume`].
+    Drama(String, BTreeMap<String, String>),
     /// Show the map with this tile's new terrain (`set_terrain`).
     Terrain(Pos),
 }
@@ -520,7 +521,7 @@ pub enum BeatKind {
         banner: BannerView,
         gold: i64,
     },
-    Drama(String),
+    Drama(String, BTreeMap<String, String>),
     /// A tile's terrain changed: the view centres on it while the map shows the change.
     Terrain(Pos),
     Outcome(bool),
@@ -759,7 +760,9 @@ pub fn plan(
                 Tone::Good,
                 1.6,
             )),
-            BattleEvent::Drama { scene } => BeatKind::Drama(scene.clone()),
+            BattleEvent::Drama { scene, terrain } => {
+                BeatKind::Drama(scene.clone(), terrain.clone())
+            }
             BattleEvent::TerrainChanged { pos } => BeatKind::Terrain(*pos),
             BattleEvent::ObjectiveChanged { text } => {
                 BeatKind::Banner(banner("목표 변경", Some(text.clone()), Tone::Neutral, 2.0))
@@ -819,7 +822,7 @@ impl EventPlayer {
         self.queue
             .iter()
             .filter_map(|beat| match &beat.kind {
-                BeatKind::Drama(scene) => Some(scene.clone()),
+                BeatKind::Drama(scene, _) => Some(scene.clone()),
                 _ => None,
             })
             .collect()
@@ -870,7 +873,7 @@ impl EventPlayer {
             }
             let beat = self.current.as_mut().expect("current beat");
             let done = step(beat, budget, skip, scene, fx, cues);
-            if let BeatKind::Drama(_) = beat.kind {
+            if let BeatKind::Drama(..) = beat.kind {
                 self.blocked = true;
             }
             if !done {
@@ -1393,9 +1396,9 @@ fn step(
             b.age = t;
             show_banner(b, first, skip, scene, cues, Some(sfx::TREASURE))
         }
-        BeatKind::Drama(scene_id) => {
+        BeatKind::Drama(scene_id, terrain) => {
             if first {
-                cues.push(Cue::Drama(scene_id.clone()));
+                cues.push(Cue::Drama(scene_id.clone(), terrain.clone()));
             }
             true
         }
@@ -1512,6 +1515,7 @@ mod tests {
             BattleEvent::ExpGained { unit: 0, amount: 8 },
             BattleEvent::Drama {
                 scene: "sishui_duel".into(),
+                terrain: BTreeMap::new(),
             },
             BattleEvent::Victory,
         ];
@@ -1524,7 +1528,7 @@ mod tests {
                 // Far apart in the fixture, so the strike is shown as a ranged one.
                 BeatKind::Strike { ranged: true, .. } => "strike",
                 BeatKind::Exp(l) if l.len() == 2 => "exp2",
-                BeatKind::Drama(_) => "drama",
+                BeatKind::Drama(..) => "drama",
                 BeatKind::Outcome(true) => "victory",
                 _ => "other",
             })
@@ -1576,6 +1580,7 @@ mod tests {
             BattleEvent::Retreated { unit: foe },
             BattleEvent::Drama {
                 scene: "sishui_duel".into(),
+                terrain: BTreeMap::new(),
             },
             BattleEvent::Victory,
         ];
@@ -1591,7 +1596,10 @@ mod tests {
         assert_eq!(scene.views[foe].hp, 0.0);
         // Blocked at the drama; nothing after it has run yet.
         assert!(player.is_blocked());
-        assert_eq!(cues.last(), Some(&Cue::Drama("sishui_duel".into())));
+        assert_eq!(
+            cues.last(),
+            Some(&Cue::Drama("sishui_duel".into(), BTreeMap::new()))
+        );
         assert!(cues.contains(&Cue::Sfx(sfx::HIT_HEAVY)));
         assert!(cues.contains(&Cue::Sfx(sfx::RETREAT)));
         let hit = cues.iter().position(|c| *c == Cue::Sfx(sfx::HIT_HEAVY));
@@ -1628,6 +1636,7 @@ mod tests {
             },
             BattleEvent::Drama {
                 scene: "sishui_duel".into(),
+                terrain: BTreeMap::new(),
             },
         ];
         let mut player = EventPlayer::default();
@@ -1637,7 +1646,10 @@ mod tests {
         let mut cues = Vec::new();
         run(&mut player, &mut scene, &mut cues, 600);
         assert!(player.is_blocked());
-        assert_eq!(cues.last(), Some(&Cue::Drama("sishui_duel".into())));
+        assert_eq!(
+            cues.last(),
+            Some(&Cue::Drama("sishui_duel".into(), BTreeMap::new()))
+        );
         assert!(!player.take_finished(), "the drama is still open");
 
         player.resume();
