@@ -253,7 +253,9 @@ The PC original hides a command behind the lord's portrait; the game keeps it (`
 `hero-game`, `CampaignState::forbidden_secret` in `hero-core`). Read from the Korean `MAIN.EXE` (the
 counter at DS `0x2D54`, the handler at image `0x1D3F2`, the orb effects at `0x1FD14`):
 
-* On a non-battle screen, tap the lord's portrait. Here: the lord's detail page of 무장 정보 in the camp.
+* On a non-battle screen, tap the lord's portrait. Here: 무장 정보 in the camp, on the lord's detail page or,
+  in a pack with the original's status window (the original mode), on that window's portrait while the lord
+  is the chosen officer.
   Like the original, it takes the mouse (or touch): keys do not count.
 * The 44th tap plays a chime and arms the prompt; the 9th tap after that asks whether to use it. "No"
   disarms it but keeps the count, so the chime comes again only when the count reaches 44 once more.
