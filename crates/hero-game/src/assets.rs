@@ -813,7 +813,8 @@ struct LoopSplit {
 ///
 /// * Input: the bytes of a sound file.
 /// * Output: the intro and the loop as two WAV files, or `None` to play the file as it is: not
-///   an uncompressed WAV file, no `smpl` loop, a loop over every frame, or a loop that does not
+///   an uncompressed WAV file, no `smpl` loop, a first loop that is not forward (backward or
+///   alternating), a loop over every frame, or a loop that does not
 ///   fit the samples (ignored rather than refused, as a player that does not know the chunk
 ///   would).
 /// * Why: macroquad 0.4 repeats only whole sounds, so the audio manager plays the intro once
@@ -856,7 +857,8 @@ fn split_loop(bytes: &[u8]) -> Option<LoopSplit> {
     }
     let rate = u32_at(fmt, 4)?;
     let block = usize::from(u16_at(fmt, 12)?);
-    if rate == 0 || block == 0 || u32_at(sampler, 28)? == 0 {
+    // Only a forward loop: a backward or alternating one cannot be a sound repeated as is.
+    if rate == 0 || block == 0 || u32_at(sampler, 28)? == 0 || u32_at(sampler, 36 + 4)? != 0 {
         return None;
     }
     let first = u32_at(sampler, 36 + 8)? as usize;
@@ -1124,11 +1126,17 @@ mod tests {
     /// `wav` with a `smpl` chunk of one loop from frame `first` to frame `last`, before or
     /// after the samples.
     fn looped_wav(wav: &[u8], first: u32, last: u32, before: bool) -> Vec<u8> {
+        looped_wav_of(wav, 0, first, last, before)
+    }
+
+    /// [`looped_wav`] with the loop type `kind` (0 forward, 1 alternating, 2 backward).
+    fn looped_wav_of(wav: &[u8], kind: u32, first: u32, last: u32, before: bool) -> Vec<u8> {
         let mut chunk = b"smpl".to_vec();
         chunk.extend(60u32.to_le_bytes());
         chunk.extend([0u8; 28]);
         chunk.extend(1u32.to_le_bytes());
-        chunk.extend([0u8; 12]);
+        chunk.extend([0u8; 8]);
+        chunk.extend(kind.to_le_bytes());
         chunk.extend(first.to_le_bytes());
         chunk.extend(last.to_le_bytes());
         chunk.extend([0u8; 8]);
@@ -1171,6 +1179,12 @@ mod tests {
         assert_eq!(split_loop(&looped_wav(&plain, 0, 499, false)), None);
         assert_eq!(split_loop(&looped_wav(&plain, 500, 600, false)), None);
         assert_eq!(split_loop(&looped_wav(&plain, 300, 200, false)), None);
+        for kind in [1, 2] {
+            assert_eq!(
+                split_loop(&looped_wav_of(&plain, kind, 100, 399, false)),
+                None
+            );
+        }
         assert_eq!(split_loop(&base_pack_file("bgm/victory.ogg")), None);
         // Cut short anywhere, it never panics.
         let full = looped_wav(&plain, 100, 399, false);
