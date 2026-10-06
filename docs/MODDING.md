@@ -863,7 +863,8 @@ actions = [{ type = "victory" }]
 **Conditions.** `when = [{ flag = "gate_open" }, { flag = "route", cmp = "==", value = 2 }]`: the event
 fires only while every condition holds. A condition compares a [flag](#flags) with `value` (default 0)
 using `cmp` (`==`, `!=`, `<`, `<=`, `>`, `>=`; default `!=`, so `{ flag = "x" }` means "x is set"). The
-flag's value is the one this battle's `set_flag` actions gave it, else the campaign's when the battle began.
+flag's value is the one this battle's `set_flag` actions, or the `@set`s of a scene the battle showed (`drama`), gave it
+last, else the campaign's when the battle began. A `@set` counts from when its scene ends.
 An event whose conditions do not hold is not used up: it fires later when they do. `unless` takes
 conditions of the same form and holds the event back once **all** of them hold ("before Liu Bei has
 talked to all three generals"); an event may have both.

@@ -537,6 +537,24 @@ impl BattleState {
             .unwrap_or(0)
     }
 
+    /// Take in the flags a scene shown during the battle set.
+    ///
+    /// * Input: the campaign's flags after the scene (the screen merged this battle's flags
+    ///   into them before it, so they hold every flag the battle has set).
+    /// * Output: every flag whose value differs from [`BattleState::flag`] is set in `flags`,
+    ///   as if an event had set it.
+    /// * Why: a scene's `@set` writes the campaign's flags, but event conditions read this
+    ///   battle's (and the campaign's only as they were when it began), so an event gated on a
+    ///   flag a mid-battle scene set never saw it. In `flags`, they also reach the campaign when
+    ///   the battle ends, which already has them.
+    pub fn take_scene_flags(&mut self, campaign: &BTreeMap<String, i64>) {
+        for (name, &value) in campaign {
+            if self.flag(name) != value {
+                self.flags.insert(name.clone(), value);
+            }
+        }
+    }
+
     /// Whether every condition of an event holds now.
     pub fn conditions_hold(&self, when: &[crate::battledef::FlagCond]) -> bool {
         when.iter().all(|c| c.cmp.eval(self.flag(&c.flag), c.value))
