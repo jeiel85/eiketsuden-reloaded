@@ -69,6 +69,7 @@ use camera::{edge_direction, Camera, EDGE_PAN_SPEED};
 use hero_core::battle::{Action, BattleEvent, BattleState, MapImage, Outcome, UnitId};
 use hero_core::battledef::{EventAction, Side};
 use hero_core::geom::Pos;
+use hero_core::map::BattleMap;
 use hero_core::pack::{BattleFrame, Pack};
 use hero_core::save::{BattleReplay, SceneResume};
 use macroquad::prelude::*;
@@ -325,6 +326,10 @@ pub struct BattleScreen {
     shown_tiles: Vec<MapImage>,
     /// The map was drawn from the tileset before a terrain change; rebuild it.
     map_stale: bool,
+    /// The terrain before a quick save's replayed animation: the map is drawn from it (not
+    /// from the state, which has the animation's changes already) until the animation shows a
+    /// terrain change or ends.
+    replay_terrain: Option<BattleMap>,
     /// Tiles the enemies could attack next phase (the "위험 범위" view option, D25 X4) with the
     /// [`player::danger_key`] they were computed for; refreshed only when that changes.
     danger: Option<(Vec<i64>, Vec<Pos>)>,
@@ -387,9 +392,7 @@ impl BattleScreen {
                         // The animation the save interrupted: the map shows where the units
                         // stood before it, and it plays again after the title card.
                         if let Some(r) = replay.filter(|r| fits_replay(r, &screen.state)) {
-                            screen.scene = anim::Scene::new(&r.before);
-                            screen.replay = Some(r);
-                            screen.replay_on_title = true;
+                            screen.start_replay(r);
                         }
                         Box::new(screen)
                     }
@@ -472,6 +475,7 @@ impl BattleScreen {
             start_levels: state.units.iter().map(|u| u.level).collect(),
             shown_tiles: state.map_images.clone(),
             map_stale: false,
+            replay_terrain: None,
             danger: None,
             state,
         }
@@ -647,14 +651,19 @@ impl BattleScreen {
                     AssetState::Loading => {}
                     AssetState::Ready => {
                         let atlas = ctx.media.texture(&ts.texture);
+                        let terrain = self.replay_terrain.as_ref().unwrap_or(&self.state.map);
                         self.map
-                            .build(&self.state.map, &self.pack, Some(ts), atlas.as_ref());
+                            .build(terrain, &self.pack, Some(ts), atlas.as_ref());
                     }
                     AssetState::Missing => {
-                        self.map.build(&self.state.map, &self.pack, None, None);
+                        let terrain = self.replay_terrain.as_ref().unwrap_or(&self.state.map);
+                        self.map.build(terrain, &self.pack, None, None);
                     }
                 },
-                None => self.map.build(&self.state.map, &self.pack, None, None),
+                None => {
+                    let terrain = self.replay_terrain.as_ref().unwrap_or(&self.state.map);
+                    self.map.build(terrain, &self.pack, None, None)
+                }
             }
         }
     }
@@ -669,6 +678,11 @@ impl BattleScreen {
     /// The animation reached a terrain change at `pos`: draw the tile's new picture, or redraw
     /// the tileset map with the new terrain.
     fn show_terrain(&mut self, pos: Pos) {
+        // From here on the state's terrain (as when the animation plays the first time: the
+        // rebuild draws every change of the batch).
+        if self.replay_terrain.take().is_some() {
+            self.map_stale = true;
+        }
         self.shown_tiles.retain(|m| m.pos != pos);
         match self.state.map_images.iter().find(|m| m.pos == pos) {
             Some(m) => self.shown_tiles.push(m.clone()),
@@ -898,6 +912,25 @@ impl BattleScreen {
         (scenes == self.events.pending_dramas().len()).then(|| r.clone())
     }
 
+    /// Show the views as they were before a quick save's interrupted animation `r` and play it
+    /// again once the title card is gone.
+    ///
+    /// * Input: the replay (it fits the state: [`fits_replay`]).
+    /// * Output: the units and the terrain drawn from `r.before`; [`show_terrain`] and
+    ///   [`events_done`] return the map to the state.
+    /// * Why the terrain too: the state already has the animation's terrain changes, so without
+    ///   it they would show from the title card on and their cue would change nothing.
+    ///
+    /// [`show_terrain`]: Self::show_terrain
+    /// [`events_done`]: Self::events_done
+    fn start_replay(&mut self, r: BattleReplay) {
+        self.scene = anim::Scene::new(&r.before);
+        self.shown_tiles = r.before.map_images.clone();
+        self.replay_terrain = Some(r.before.map.clone());
+        self.replay = Some(r);
+        self.replay_on_title = true;
+    }
+
     /// Note the events an action queued for the animation ([`BattleScreen::replay`]): they
     /// start a new record when the queue was idle (`before` is the state then), else they
     /// follow the record's.
@@ -917,6 +950,11 @@ impl BattleScreen {
     /// The animation queue ran dry: snap the views to the state and continue the flow.
     fn events_done(&mut self) {
         self.replay = None;
+        // A replayed animation that showed no terrain change: catch the map up with the state.
+        if self.replay_terrain.take().is_some() {
+            self.map_stale = true;
+            self.shown_tiles = self.state.map_images.clone();
+        }
         self.scene.sync(&self.state);
         if matches!(self.ui.mode, Mode::Walking { .. }) {
             self.ui.walked(&self.state, self.move_undoable);
@@ -2259,6 +2297,47 @@ mod tests {
     /// The animation an action queued is recorded from the state before it until the queue
     /// runs dry, and a quick save keeps it with its scenes not started yet (they play with it);
     /// once one of its scenes has started, the save keeps the animation finished as before.
+    #[test]
+    fn a_replayed_animation_shows_the_terrain_before_it() {
+        let mut s = screen(false);
+        s.stage = Stage::Battle;
+        let before = s.state.clone();
+        // The saved state has the animation's terrain change at (1, 1) already.
+        let at = Pos::new(1, 1);
+        let tile = (at.y * s.state.map.width + at.x) as usize;
+        s.state.map.tiles[tile] =
+            (s.state.map.tiles[tile] + 1) % s.state.map.terrain_ids.len() as u16;
+        let image = MapImage {
+            pos: at,
+            image: "maps/gate_open".into(),
+        };
+        s.state.map_images.push(image.clone());
+        s.shown_tiles = s.state.map_images.clone();
+        let r = BattleReplay {
+            before: before.clone(),
+            events: vec![BattleEvent::TerrainChanged { pos: at }],
+        };
+        assert!(fits_replay(&r, &s.state));
+        s.start_replay(r.clone());
+        // Until the animation reaches it, the map is drawn from the terrain before.
+        assert_eq!(s.replay_terrain.as_ref(), Some(&before.map));
+        assert_eq!(s.shown_tiles, before.map_images);
+        assert!(s.replay_on_title);
+        // The cue: the state's terrain from then on.
+        s.show_terrain(at);
+        assert_eq!(s.replay_terrain, None);
+        assert!(s.map_stale);
+        assert!(s.shown_tiles.contains(&image));
+
+        // An animation that ends without showing the change still catches the map up.
+        s.map_stale = false;
+        s.start_replay(r);
+        s.events_done();
+        assert_eq!(s.replay_terrain, None);
+        assert!(s.map_stale);
+        assert_eq!(s.shown_tiles, s.state.map_images);
+    }
+
     #[test]
     fn a_quick_save_keeps_the_animation_still_playing() {
         let mut s = screen(false);
