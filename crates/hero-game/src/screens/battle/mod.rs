@@ -1735,7 +1735,13 @@ impl Screen for BattleScreen {
             }
             Enter::Resumed => {
                 match self.waiting.take() {
-                    Some(Waiting::Drama) => self.events.resume(),
+                    Some(Waiting::Drama) => {
+                        // Event conditions see what the scene's `@set` changed.
+                        if let Some(session) = ctx.session.as_ref() {
+                            self.state.take_scene_flags(&session.campaign.flags);
+                        }
+                        self.events.resume();
+                    }
                     Some(Waiting::Screen) | None => {}
                 }
                 // A drama or the settings may have changed the music.

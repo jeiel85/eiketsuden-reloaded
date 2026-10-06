@@ -1091,6 +1091,33 @@ fn event_conditions_read_battle_and_campaign_flags() {
     assert!(text.contains("cmp = \"==\""), "{text}");
 }
 
+/// A scene shown during the battle sets flags in the campaign: the battle takes them in, so
+/// events gated on them see them.
+#[test]
+fn flags_a_mid_battle_scene_set_reach_the_battle() {
+    let pack = pack_with(battle("...."));
+    let mut st = state(&pack);
+    st.start_flags.insert("route".into(), 2);
+    st.flags.insert("gate".into(), 1);
+    // The campaign after the scene: the battle's flags merged in, then the scene's `@set`s.
+    let mut campaign = st.start_flags.clone();
+    campaign.extend(st.flags.clone());
+    campaign.insert("ambush".into(), 1);
+    campaign.insert("gate".into(), 0);
+    let mut unchanged = campaign.clone();
+    unchanged.insert("route".into(), 2);
+    st.take_scene_flags(&campaign);
+    assert_eq!(
+        (st.flag("ambush"), st.flag("gate"), st.flag("route")),
+        (1, 0, 2)
+    );
+    // Only what differs is written: the start flag stays where it was.
+    assert!(!st.flags.contains_key("route"));
+    let before = st.flags.clone();
+    st.take_scene_flags(&unchanged);
+    assert_eq!(st.flags, before);
+}
+
 fn def_of(pack: &Pack) -> &BattleDef {
     &pack.battles[BATTLE]
 }
