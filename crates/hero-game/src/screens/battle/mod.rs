@@ -1736,9 +1736,11 @@ impl Screen for BattleScreen {
             Enter::Resumed => {
                 match self.waiting.take() {
                     Some(Waiting::Drama) => {
-                        // Event conditions see what the scene's `@set` changed.
+                        // Event conditions see what the scene's `@set` changed, and so does a
+                        // save made before the next action (it writes the session's battle).
                         if let Some(session) = ctx.session.as_ref() {
                             self.state.take_scene_flags(&session.campaign.flags);
+                            self.store_session(ctx);
                         }
                         self.events.resume();
                     }
