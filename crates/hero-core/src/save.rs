@@ -2,7 +2,7 @@
 //! in progress and a drama scene played half-way. Storage (files natively, localStorage on the
 //! web) is the frontend's job.
 
-use crate::battle::BattleState;
+use crate::battle::{BattleEvent, BattleState};
 use crate::campaign::CampaignState;
 use crate::drama::{DramaRunner, Step};
 use serde::{Deserialize, Serialize};
@@ -76,6 +76,25 @@ pub struct SaveGame {
     /// The battle state has already moved past them, so they are played after loading.
     #[serde(default)]
     pub pending_scenes: Vec<String>,
+    /// The battle animation a mid-battle quick save interrupted, played again after loading
+    /// ([`BattleReplay`]). Saves without it (and games that do not know it) load with the
+    /// animation finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub battle_replay: Option<BattleReplay>,
+}
+
+/// The battle's animation still playing when a quick save was made: the state before the first
+/// action whose animation had not finished, and the events of that action and the ones after it
+/// (in order).
+///
+/// Why the state before and not the pictures on screen: [`Self::battle`](SaveGame::battle) is
+/// already past these events (the rules run first, the animation after), and the frontend
+/// draws the units from a state; the one before the events gives it where they stood, and
+/// the events say what the animation shows from there. Nothing of the screen is serialised.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BattleReplay {
+    pub before: BattleState,
+    pub events: Vec<BattleEvent>,
 }
 
 /// How a drama scene that is resumed half-way ends.
@@ -129,6 +148,24 @@ pub struct SceneResume {
     /// existed have none and need the same pack version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
+    /// The timed step that was playing ([`Playing`]): loading goes on with it instead of
+    /// starting after it. Saves without it (and games that do not know it) start after it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playing: Option<Playing>,
+}
+
+/// A timed step of a scene in progress when it was quick saved (BACKLOG: 순간 저장의 연출 남은
+/// 시간). Its effect on the stage is already in [`SceneResume::stage`]; this is only its time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Playing {
+    /// `@wait`: milliseconds left.
+    Wait { ms: u32 },
+    /// `@fade out` / `@fade in`: how dark the screen was, in thousandths (0 clear, 1000 black);
+    /// the fade goes on from there to the end the stage records.
+    Fade { permille: u16 },
+    /// `@duel_act`: the move (the last of the stage's steps) is played again from its start.
+    DuelAct,
 }
 
 impl SceneResume {
@@ -317,6 +354,7 @@ mod tests {
             battle: None,
             scene: None,
             pending_scenes: Vec::new(),
+            battle_replay: None,
         }
     }
 
@@ -346,6 +384,7 @@ mod tests {
             terrain: BTreeMap::from([("liu_bei".to_string(), "plain".to_string())]),
             backlog: vec![(Some("유비".into()), "가자.".into()), (None, "…".into())],
             fingerprint: None,
+            playing: None,
         }
     }
 
@@ -358,6 +397,43 @@ mod tests {
         let back = SaveGame::from_json(&s.to_json(), "base").unwrap();
         assert_eq!(back, s);
         assert_eq!(back.version, SCENE_SAVE_VERSION);
+    }
+
+    /// A save without an interrupted battle animation does not write the field, and one without
+    /// it (an earlier game's) reads as none.
+    #[test]
+    fn a_save_without_a_battle_replay_writes_none() {
+        let json = save().to_json();
+        assert!(!json.contains("battle_replay"), "{json}");
+        assert_eq!(
+            SaveGame::from_json(&json, "base").unwrap().battle_replay,
+            None
+        );
+    }
+
+    /// The timed step that was playing goes into the record and back; a record without it
+    /// (an earlier game's) reads as none.
+    #[test]
+    fn the_playing_step_round_trips() {
+        for playing in [
+            Playing::Wait { ms: 457 },
+            Playing::Fade { permille: 250 },
+            Playing::DuelAct,
+        ] {
+            let mut s = save();
+            let mut r = resume();
+            r.playing = Some(playing);
+            s.scene = Some(r);
+            s.stamp_version();
+            let back = SaveGame::from_json(&s.to_json(), "base").unwrap();
+            assert_eq!(back.scene.unwrap().playing, Some(playing));
+        }
+        let mut s = save();
+        s.scene = Some(resume());
+        let json = s.to_json();
+        assert!(!json.contains("playing"), "{json}");
+        let back = SaveGame::from_json(&json, "base").unwrap();
+        assert_eq!(back.scene.unwrap().playing, None);
     }
 
     /// Saves written before quick saves have no `scene` / `pending_scenes` and must still load.

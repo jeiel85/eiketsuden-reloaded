@@ -48,6 +48,7 @@ fn resume_of(runner: &DramaRunner, choice: Option<Vec<String>>) -> SceneResume {
         terrain: BTreeMap::new(),
         backlog: Vec::new(),
         fingerprint: None,
+        playing: None,
     }
 }
 
@@ -64,6 +65,7 @@ fn through_a_save(campaign: &CampaignState, resume: SceneResume) -> (CampaignSta
         battle: None,
         scene: Some(resume),
         pending_scenes: Vec::new(),
+        battle_replay: None,
     };
     save.stamp_version();
     assert_eq!(save.version, SCENE_SAVE_VERSION);
@@ -181,6 +183,7 @@ fn save_of(pack: &Pack, node: &str, scene: Option<SceneResume>) -> SaveGame {
         battle: None,
         scene,
         pending_scenes: Vec::new(),
+        battle_replay: None,
     };
     save.stamp_version();
     save

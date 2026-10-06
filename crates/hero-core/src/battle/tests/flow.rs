@@ -1091,6 +1091,23 @@ fn event_conditions_read_battle_and_campaign_flags() {
     assert!(text.contains("cmp = \"==\""), "{text}");
 }
 
+/// The animation a quick save interrupted is written as the state before it and its events,
+/// and read back unchanged.
+#[test]
+fn a_battle_replay_round_trips() {
+    let pack = pack(OPEN_MAP);
+    let mut st = state(&pack);
+    add(&mut st, &pack, Side::Player, "infantry", 1, p(0, 0));
+    add(&mut st, &pack, Side::Enemy, "infantry", 1, p(7, 7));
+    let before = st.clone();
+    let events = st.begin(&pack);
+    assert!(!events.is_empty());
+    let replay = crate::save::BattleReplay { before, events };
+    let back: crate::save::BattleReplay =
+        serde_json::from_str(&serde_json::to_string(&replay).unwrap()).unwrap();
+    assert_eq!(back, replay);
+}
+
 fn def_of(pack: &Pack) -> &BattleDef {
     &pack.battles[BATTLE]
 }

@@ -25,7 +25,7 @@ use crate::flow::{save_label, Session};
 use crate::saves;
 use hero_core::battle::BattleState;
 use hero_core::pack::Pack;
-use hero_core::save::{ResumeError, SaveGame, SceneResume};
+use hero_core::save::{BattleReplay, ResumeError, SaveGame, SceneResume};
 use macroquad::prelude::KeyCode;
 
 /// Key that quick saves.
@@ -47,6 +47,8 @@ pub enum ResumePoint {
         state: Box<BattleState>,
         pending_scenes: Vec<String>,
         scene: Option<Box<SceneResume>>,
+        /// The animation still playing, to play again after loading ([`BattleReplay`]).
+        replay: Option<Box<BattleReplay>>,
     },
     /// The screen cannot be saved right now; the text says why (shown as a toast).
     Unavailable(&'static str),
@@ -69,6 +71,7 @@ pub fn snapshot(
     let mut battle = None;
     let mut pending_scenes = Vec::new();
     let mut scene = None;
+    let mut battle_replay = None;
     for point in points {
         match point {
             ResumePoint::Scene(s) => scene = Some(*s),
@@ -76,9 +79,11 @@ pub fn snapshot(
                 state,
                 pending_scenes: pending,
                 scene: resumed,
+                replay,
             } => {
                 battle = Some(*state);
                 pending_scenes = pending;
+                battle_replay = replay.map(|r| *r);
                 if let Some(resumed) = resumed {
                     scene = Some(*resumed);
                 }
@@ -91,6 +96,7 @@ pub fn snapshot(
     save.battle = battle;
     save.scene = scene;
     save.pending_scenes = pending_scenes;
+    save.battle_replay = battle_replay;
     save.stamp_version();
     Ok(save)
 }
@@ -177,6 +183,7 @@ mod tests {
             terrain: BTreeMap::new(),
             backlog: Vec::new(),
             fingerprint: None,
+            playing: None,
         }
     }
 
@@ -245,6 +252,7 @@ mod tests {
                 state: Box::new(state.clone()),
                 pending_scenes: vec!["p1_after".into()],
                 scene: None,
+                replay: None,
             }],
         )
         .unwrap();

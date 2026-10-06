@@ -124,6 +124,7 @@ impl Session {
             battle: self.battle.clone(),
             scene: None,
             pending_scenes: Vec::new(),
+            battle_replay: None,
         };
         // (Growth queued for officers not in the army, or choices of the new game, need a
         // newer layout.)
@@ -214,6 +215,7 @@ pub fn enter(flow: Flow, ctx: &mut Ctx) -> Box<dyn Screen> {
             }
             let resume = save.scene.clone();
             let pending_scenes = save.pending_scenes.clone();
+            let replay = save.battle_replay.clone();
             let session = Session::from_save(*save);
             let mid_battle = session.battle.is_some();
             ctx.session = Some(session);
@@ -221,7 +223,7 @@ pub fn enter(flow: Flow, ctx: &mut Ctx) -> Box<dyn Screen> {
                 // A quick save made in the middle of a scene of the campaign.
                 Some(resume) if !mid_battle => Box::new(DramaScreen::restore(ctx, resume)),
                 // In the middle of a battle: possibly with a scene shown over it.
-                resume if mid_battle => battle_screen(ctx, &pack, resume, pending_scenes),
+                resume if mid_battle => battle_screen(ctx, &pack, resume, pending_scenes, replay),
                 _ => show_current_node(ctx, &pack),
             }
         }
@@ -399,10 +401,11 @@ pub fn battle_screen(
     pack: &Rc<Pack>,
     scene: Option<SceneResume>,
     pending_scenes: Vec<String>,
+    replay: Option<hero_core::save::BattleReplay>,
 ) -> Box<dyn Screen> {
     let _ = pack;
     match ctx.session.as_ref().and_then(|s| s.battle.as_ref()) {
-        Some(_) => crate::screens::battle::BattleScreen::resume(ctx, scene, pending_scenes),
+        Some(_) => crate::screens::battle::BattleScreen::resume(ctx, scene, pending_scenes, replay),
         None => no_session(),
     }
 }
@@ -617,6 +620,7 @@ mod tests {
             terrain: BTreeMap::new(),
             backlog: Vec::new(),
             fingerprint: None,
+            playing: None,
         }
     }
 
