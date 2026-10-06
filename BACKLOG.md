@@ -122,6 +122,8 @@
     시작 무장(유비·관우·장비)의 `BAKDATA` 병종·레벨이 원작의 시작과 같은지는 실물로 확인한다.) (3) 원작 무장과 대응이 없는
     기본 팩 무장(얼굴 행의 10명, 기본 팩이 새로 만든 인물 등)은 이제 어느 전투도 쓰지 않으므로 명단에서 뺄 수 있다. 에셋
     파이프라인의 얼굴 표(`tools/assets/portraits.toml`)와 얼굴 파일(`build.py --check`의 고아 검사)도 함께 고친다.
+    목록은 원작 모드 팩에 `hero-tools unused-officers <팩>`을 돌려 뽑는다(2026-10-06, ROADMAP M6-2. 기본 팩만으로는
+    118명 중 111명이 나와 판단할 수 없다).
   - 왜: D21 3단계. 원작 모드의 무장이 원작 값이어야 한다.
   - 영향 범위: hero-import `pack.rs`(`original_officers`·`convert_officers`), 원작 모드의 역할 대응표(`battles.rs`)
 

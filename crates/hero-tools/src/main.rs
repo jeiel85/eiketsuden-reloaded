@@ -1,5 +1,5 @@
 //! `hero-tools`: command line tools for Eiketsuden Reloaded data packs (`validate`,
-//! `simulate`, `info`) and the experimental importer for an owned copy of the original game
+//! `simulate`, `info`, `unused-officers`) and the experimental importer for an owned copy of the original game
 //! (`original probe|extract|pack`). See `hero-tools --help`, `docs/MODDING.md` and
 //! `docs/ORIGINAL_DATA.md`.
 
@@ -8,6 +8,7 @@ mod cli;
 mod info;
 mod original;
 mod simulate;
+mod unused;
 mod validate;
 
 use cli::Command;
@@ -59,6 +60,7 @@ fn main() -> ExitCode {
             options,
         } => campaign_sim::run(&pack, seeds, &choose, &options),
         Command::Info { pack } => info::run(&pack).map_err(Failure::Failed),
+        Command::UnusedOfficers { pack } => unused::run(&pack).map_err(Failure::Failed),
         Command::OriginalProbe { dir, out } => {
             original::run_probe(&dir, out.as_deref()).map_err(Failure::Failed)
         }
