@@ -373,13 +373,17 @@ fn begin_plays_intro_then_starts_turn_one() {
         ev,
         vec![
             BattleEvent::Drama {
-                scene: "intro".into()
+                scene: "intro".into(),
+                terrain: Default::default(),
             },
             BattleEvent::PhaseStart {
                 side: Side::Player,
                 turn: 1
             },
-            BattleEvent::Drama { scene: "t1".into() },
+            BattleEvent::Drama {
+                scene: "t1".into(),
+                terrain: Default::default(),
+            },
         ]
     );
     assert_eq!((st.turn, st.phase), (1, Side::Player));

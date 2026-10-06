@@ -395,6 +395,11 @@ pub enum BattleEvent {
     /// Play a drama scene now (battle state has already been updated).
     Drama {
         scene: String,
+        /// The terrain under each officer as the scene began ([`BattleState::officer_terrain`]),
+        /// for the backgrounds of its duels (`@duel` with a `terrain` background); empty for a
+        /// scene without a duel.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        terrain: BTreeMap<String, String>,
     },
     BonusAchieved {
         exp: u32,
@@ -558,8 +563,98 @@ impl BattleState {
     /// Whether the flags let `event` fire now: all of its `when` hold and, if it has an
     /// `unless`, not all of that.
     pub fn flags_allow(&self, event: &crate::battledef::EventDef) -> bool {
-        self.conditions_hold(&event.when)
-            && (event.unless.is_empty() || !self.conditions_hold(&event.unless))
+        self.flags_hold(&event.when, &event.unless)
+    }
+
+    /// The actions of `actions` that would run now: those inside a `when` action only while its
+    /// flags allow ([`BattleState::flags_hold`]), in order.
+    ///
+    /// Input: an event's actions. Output: the ones on the path the flags take now.
+    ///
+    /// Why: what judges an event by its actions (the AI's goals: does it win or lose the
+    /// battle?) must not count a guarded part that cannot run, nor let one guarded ending
+    /// hide another that can (mutually exclusive `victory` and `defeat` parts).
+    pub fn active_actions<'a>(
+        &self,
+        actions: &'a [crate::battledef::EventAction],
+    ) -> Vec<&'a crate::battledef::EventAction> {
+        let mut out = Vec::new();
+        for a in actions {
+            out.push(a);
+            if let crate::battledef::EventAction::When {
+                when,
+                unless,
+                actions,
+            } = a
+            {
+                if self.flags_hold(when, unless) {
+                    out.extend(self.active_actions(actions));
+                }
+            }
+        }
+        out
+    }
+
+    /// Every condition of `when` holds and, when `unless` has any, not all of them do (an
+    /// event's or an [`crate::battledef::EventAction::When`]'s flags).
+    pub fn flags_hold(
+        &self,
+        when: &[crate::battledef::FlagCond],
+        unless: &[crate::battledef::FlagCond],
+    ) -> bool {
+        self.conditions_hold(when) && (unless.is_empty() || !self.conditions_hold(unless))
+    }
+
+    /// The terrain id under each officer on the map, for the duels of the battle's scenes
+    /// (`@duel ... terrain`). Retreated officers count at their last cell, after the ones on
+    /// the map; hidden reinforcements do not count.
+    ///
+    /// Input: the pack. Output: officer id → terrain id.
+    ///
+    /// Why the retreated ones: a duel told after its loser left the field (an event's scene
+    /// played once its actions have run) still shows the ground the loser fought on.
+    pub fn officer_terrain(&self, pack: &Pack) -> BTreeMap<String, String> {
+        let mut terrain = BTreeMap::new();
+        for on_map in [true, false] {
+            for u in &self.units {
+                let wanted = if on_map {
+                    u.is_active()
+                } else {
+                    u.state == UnitState::Retreated
+                };
+                let (Some(officer), true) = (u.officer.as_ref(), wanted) else {
+                    continue;
+                };
+                if let Some(t) = self.terrain_at(pack, u.pos) {
+                    terrain
+                        .entry(officer.to_string())
+                        .or_insert_with(|| t.id.to_string());
+                }
+            }
+        }
+        terrain
+    }
+
+    /// The event that plays scene `scene` now: with the officers' terrain at this moment when
+    /// the scene has a duel ([`BattleEvent::Drama`]).
+    ///
+    /// Why now and not when the frontend opens the scene: an event's actions all run before
+    /// its scene is shown, so a `set_terrain` after the `drama` in the same event would
+    /// otherwise already show under the duel (ROADMAP M6-3).
+    pub(crate) fn drama_event(&self, pack: &Pack, scene: &str) -> BattleEvent {
+        let duel = pack.scene(scene).is_some_and(|s| {
+            s.cmds
+                .iter()
+                .any(|c| matches!(c, crate::script::Cmd::Duel { .. }))
+        });
+        BattleEvent::Drama {
+            scene: scene.to_string(),
+            terrain: if duel {
+                self.officer_terrain(pack)
+            } else {
+                BTreeMap::new()
+            },
+        }
     }
 
     pub fn terrain_at<'a>(&self, pack: &'a Pack, pos: Pos) -> Option<&'a TerrainDef> {

@@ -657,6 +657,24 @@ fn stage_and_terrain_actions_are_checked() {
     assert!(issues.is_empty(), "{}", format_issues(&issues));
 }
 
+/// A reference inside a `when` action is checked once, however deep it is nested.
+#[test]
+fn a_nested_unit_reference_is_reported_once() {
+    let mut files = fixture_files();
+    edit(
+        &mut files,
+        "battles/b01.toml",
+        "{ type = \"spawn\", group = \"rein\" }",
+        "{ type = \"spawn\", group = \"rein\" }, { type = \"when\", actions = [{ type = \"when\", actions = [{ type = \"retreat\", target = \"nobody\" }] }] }",
+    );
+    let issues = load(&files).validate();
+    let found = issues
+        .iter()
+        .filter(|i| i.msg.contains("`nobody` matches no unit"))
+        .count();
+    assert_eq!(found, 1, "{issues:#?}");
+}
+
 #[test]
 fn battle_logic_checks() {
     run(&[
@@ -710,6 +728,34 @@ fn battle_logic_checks() {
             &[(B01, "scene = \"b01_duel\"", "scene = \"b01_fight\"")],
             "battle b01 event #2",
             "plays unknown scene `b01_fight`",
+        ),
+        // What a `when` action holds is checked as the event's own actions are.
+        error(
+            &[(
+                B01,
+                "{ type = \"spawn\", group = \"rein\" }",
+                "{ type = \"when\", when = [{ flag = \"b01_route\" }], actions = [{ type = \"spawn\", group = \"rain\" }] }",
+            )],
+            "battle b01 event #1",
+            "spawns group `rain`, but no unit belongs to it",
+        ),
+        error(
+            &[(
+                B01,
+                "{ type = \"spawn\", group = \"rein\" }",
+                "{ type = \"when\", actions = [{ type = \"spawn\", group = \"rein\" }, { type = \"drama\", scene = \"b01_fight\" }] }",
+            )],
+            "battle b01 event #1",
+            "plays unknown scene `b01_fight`",
+        ),
+        warning(
+            &[(
+                B01,
+                "{ type = \"spawn\", group = \"rein\" }",
+                "{ type = \"spawn\", group = \"rein\" }, { type = \"when\", actions = [] }",
+            )],
+            "battle b01 event #1",
+            "has a `when` action without actions",
         ),
         error(
             &[(B01, "item = \"fire_scroll\"", "item = \"ice_scroll\"")],
