@@ -1508,6 +1508,34 @@ mod tests {
         assert!(scene("c3_s0_b2_outro").starts_with("@if orig_f255 == 0 -> outro_"));
         assert!(scene("c3_s4_b0_before").contains("@join guan_yu\n"));
         assert!(scene("c3_s4_b0_defeat").contains("@away guan_yu\n"));
+        // A battle's moves in or out of the army come first in its defeat scene too (Yiling's
+        // Shamoke when the story goes on after losing): the original moves them as the event runs.
+        for (head, _) in story.match_indices("\n== ") {
+            let id = story[head + 4..].lines().next().unwrap();
+            let Some(battle) = id.strip_suffix("_outro") else {
+                continue;
+            };
+            let outro = scene(id);
+            let moves: String = outro
+                .split_inclusive('\n')
+                .collect::<Vec<_>>()
+                .chunks(3)
+                .take_while(|lines| {
+                    lines.len() == 3
+                        && (lines[0].starts_with("@if orig_join_")
+                            || lines[0].starts_with("@if orig_away_"))
+                        && lines[2].starts_with("@label army_")
+                })
+                .flatten()
+                .copied()
+                .collect();
+            if !moves.is_empty() && story.contains(&format!("\n== {battle}_defeat\n")) {
+                assert!(
+                    scene(&format!("{battle}_defeat")).starts_with(&moves),
+                    "{battle}"
+                );
+            }
+        }
         // Chapter 4's detachment comes back as Xuchang's setup says.
         assert!(scene("c4_s1_b6_before").contains("@join zhao_yun\n"));
         // What a setup says before the sortie (ROADMAP M4-1): Maicheng's pictures and narration

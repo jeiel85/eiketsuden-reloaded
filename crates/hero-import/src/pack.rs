@@ -3246,42 +3246,16 @@ fn convert_battles(
                 let part = block
                     .and_then(|(b, leg)| part_of.get(&(file, scene_index, b, leg)))
                     .copied();
-                // (A setup's arrival names only its officer; a friendly roster's ally carries its
-                // own class and stays an ally. One who may be in the army, by the route, arrives
-                // on the player's side too: the battle places the army's officer when they are.)
-                for u in converted.battle.units.iter_mut().filter(|u| {
-                    u.group.is_some()
-                        && u.side == hero_core::battledef::Side::Ally
-                        && u.class.is_none()
-                }) {
-                    if u.officer
-                        .as_deref()
-                        .is_some_and(|o| army_at(o, part) != chapters::ARMY_OUT)
-                    {
-                        u.side = hero_core::battledef::Side::Player;
-                    }
-                }
+                battles::arrive_from_the_army(&mut converted.battle.units, |o| {
+                    army_at(o, part) != chapters::ARMY_OUT
+                });
             }
             // The officers the original brings onto the field during a chapter's battle (allies,
             // reinforcements) are not deployed from the army as well (the base pack forbids
             // them the same way).
             if pairing.battle.is_empty() {
                 let lord = names.officers.get(&battles::LIU_BEI);
-                let joining: BTreeSet<String> = converted
-                    .battle
-                    .units
-                    .iter()
-                    .filter(|u| u.side != hero_core::battledef::Side::Enemy)
-                    .filter_map(|u| u.officer.clone())
-                    .filter(|o| Some(o) != lord)
-                    .collect();
-                let deploy = &mut converted.battle.deploy;
-                deploy.required.retain(|o| !joining.contains(o));
-                for o in joining {
-                    if !deploy.forbidden.contains(&o) {
-                        deploy.forbidden.push(o);
-                    }
-                }
+                battles::keep_off_the_deploy(&mut converted.battle, lord.map(String::as_str));
             }
             // Events of a stage no converted event moves the battle to never fire (the part of
             // the original that led there was not converted): they are left out.
@@ -3333,17 +3307,10 @@ fn convert_battles(
                     }
                 }
             }
-            // Officers the battle moves in or out of the army: its outro acts on their flags.
+            // Officers the battle moves in or out of the army: its outro, and its defeat scene
+            // when the story goes on after losing, act on their flags.
             if pairing.battle.is_empty() {
-                let mut prefix = String::new();
-                for (n, (officer, joins)) in converted.army.iter().enumerate() {
-                    let _ = writeln!(
-                        prefix,
-                        "@if {} == 0 -> army_{n}\n@{} {officer}\n@label army_{n}",
-                        battles::army_flag(officer, *joins),
-                        if *joins { "join" } else { "away" }
-                    );
-                }
+                let prefix = battles::army_moves(&converted.army);
                 if !prefix.is_empty() {
                     converted
                         .battle
@@ -3525,7 +3492,8 @@ fn convert_battles(
                 };
                 let mut next = chapters::Next::Default;
                 // Its outro (played by the battle) and what it sets up for the next camp; the
-                // officers the battle moved in or out of the army come first.
+                // officers the battle moved in or out of the army come first (in its defeat
+                // scene too: the original moves them when the event runs, won or lost).
                 let army = army_scenes.get(&id).map_or("", String::as_str);
                 if let Some((outro_id, s)) = outro {
                     // (Its victory script is gated on the flag only where an event sets it.)
@@ -3559,7 +3527,7 @@ fn convert_battles(
                             id.clone()
                         }),
                         defeat: defeats.get(&(*file, *scene, *block, *leg)).map(|(id, d)| {
-                            let _ = write!(story, "\n== {id}\n{}", d.text);
+                            let _ = write!(story, "\n== {id}\n{army}{}", d.text);
                             for note in &d.notes {
                                 report.notes.push(format!("{id}: {note}"));
                             }

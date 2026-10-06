@@ -1009,6 +1009,74 @@ pub fn army_flag(officer: &str, joins: bool) -> String {
     }
 }
 
+/// The lines that move the officers of [`Converted::army`] in or out of the army after the battle.
+///
+/// * Input: the officers and whether each joins.
+/// * Output: per officer, `@join` or `@away` behind its [`army_flag`] (empty without any).
+/// * Why: the battle only sets the flag (the event may not run), and the campaign's scenes
+///   after the battle (the outro, and the defeat scene when losing goes on) act on it; both
+///   start with the same lines, so they are written in one place.
+pub fn army_moves(army: &[(String, bool)]) -> String {
+    let mut lines = String::new();
+    for (n, (officer, joins)) in army.iter().enumerate() {
+        let _ = writeln!(
+            lines,
+            "@if {} == 0 -> army_{n}\n@{} {officer}\n@label army_{n}",
+            army_flag(officer, *joins),
+            if *joins { "join" } else { "away" }
+        );
+    }
+    lines
+}
+
+/// Put the officers a chapter's battle brings onto the field who are in the army on the
+/// player's side.
+///
+/// * Input: the battle's units, and whether an officer may be in the army when the battle is
+///   fought (by any way the story gets there).
+/// * Output: the officer units of a reinforcement group that the setup made allies without a
+///   class of their own become player units; every other unit stays as it is.
+/// * Why: the original keeps an army officer's slot back until `join_battle` and then fields
+///   them as the army's officer with their progress; the battle places the army's officer only
+///   when they are in it. A friendly roster's ally carries its own class and stays an ally, as
+///   does an officer who is out of the army on every way there (Xuchang 2's Huang Zhong and Yan
+///   Yan, whom the setup scene sends away).
+pub fn arrive_from_the_army(units: &mut [UnitSpawn], may_be_in_army: impl Fn(&str) -> bool) {
+    for u in units
+        .iter_mut()
+        .filter(|u| u.group.is_some() && u.side == Side::Ally && u.class.is_none())
+    {
+        if u.officer.as_deref().is_some_and(&may_be_in_army) {
+            u.side = Side::Player;
+        }
+    }
+}
+
+/// Keep the officers a chapter's battle fields itself off its deployment.
+///
+/// * Input: the battle, and the lord's officer id (deployed as always).
+/// * Output: every officer of a non-enemy unit but the lord is out of `deploy.required` and in
+///   `deploy.forbidden` (once).
+/// * Why: they come onto the field as their own units (allies, reinforcements, arrivals from the
+///   army), so deploying them from the army as well would field them twice; the base pack
+///   forbids them the same way.
+pub fn keep_off_the_deploy(battle: &mut BattleDef, lord: Option<&str>) {
+    let joining: BTreeSet<String> = battle
+        .units
+        .iter()
+        .filter(|u| u.side != Side::Enemy)
+        .filter_map(|u| u.officer.clone())
+        .filter(|o| Some(o.as_str()) != lord)
+        .collect();
+    let deploy = &mut battle.deploy;
+    deploy.required.retain(|o| !joining.contains(o));
+    for o in joining {
+        if !deploy.forbidden.contains(&o) {
+            deploy.forbidden.push(o);
+        }
+    }
+}
+
 /// Whether a trigger record is an objective of Liu Bei's: he stands on a tile or in an area and
 /// the script runs the battle routine (`data` kind 4).
 fn is_routine(r: &Record) -> bool {
@@ -3065,6 +3133,74 @@ fn arrival_group(record: usize) -> String {
 pub(crate) mod tests {
     use super::*;
     use crate::scenario::{Arg, ArgKind, Block, Instr, Record, Trigger as RecTrigger};
+
+    #[test]
+    fn arrivals_in_the_army_come_on_the_players_side() {
+        let mut battle = base_battle();
+        let ally = |officer: &str, class: Option<&str>, group: Option<&str>| UnitSpawn {
+            side: Side::Ally,
+            officer: Some(officer.into()),
+            class: class.map(Into::into),
+            group: group.map(Into::into),
+            ..battle.units[0].clone()
+        };
+        battle.units.extend([
+            // Xuchang 1's detachment: in the army, arriving in the 12th turn.
+            ally("zhao_yun", None, Some("original_14")),
+            // In the army on some ways there only: the battle places the army's officer then.
+            ally("liu_feng", None, Some("original_14")),
+            // Xuchang 2's Huang Zhong: sent away by the setup scene on every way there.
+            ally("huang_zhong", None, Some("original_20")),
+            // A friendly roster's ally, with its own class.
+            ally("ma_chao", Some("cavalry"), Some("original_21")),
+            // An ally on the field from the start.
+            ally("liu_biao", None, None),
+        ]);
+        let in_army = ["zhao_yun", "liu_feng", "ma_chao", "liu_biao"];
+        arrive_from_the_army(&mut battle.units, |o| in_army.contains(&o));
+        let side = |o: &str| {
+            battle
+                .units
+                .iter()
+                .find(|u| u.officer.as_deref() == Some(o))
+                .unwrap()
+                .side
+        };
+        assert_eq!(side("zhao_yun"), Side::Player);
+        assert_eq!(side("liu_feng"), Side::Player);
+        assert_eq!(side("huang_zhong"), Side::Ally);
+        assert_eq!(side("ma_chao"), Side::Ally);
+        assert_eq!(side("liu_biao"), Side::Ally);
+        assert_eq!(side("boss"), Side::Enemy);
+
+        // None of them is deployed from the army as well (but the lord).
+        battle.deploy.required = vec!["zhao_yun".into(), "guan_yu".into(), "liu_bei".into()];
+        battle.deploy.forbidden = vec!["ma_chao".into()];
+        battle.units.push(UnitSpawn {
+            side: Side::Player,
+            ..battle.units[0].clone()
+        });
+        battle.units.last_mut().unwrap().officer = Some("liu_bei".into());
+        keep_off_the_deploy(&mut battle, Some("liu_bei"));
+        assert_eq!(battle.deploy.required, ["guan_yu", "liu_bei"]);
+        let mut forbidden = battle.deploy.forbidden.clone();
+        forbidden.sort();
+        assert_eq!(
+            forbidden,
+            ["huang_zhong", "liu_biao", "liu_feng", "ma_chao", "zhao_yun"]
+        );
+        assert_eq!(battle.deploy.forbidden[0], "ma_chao", "already there: once");
+    }
+
+    #[test]
+    fn army_moves_act_on_the_flags_the_battle_sets() {
+        assert_eq!(army_moves(&[]), "");
+        assert_eq!(
+            army_moves(&[("jiang_wei".into(), true), ("orig_p88".into(), false)]),
+            "@if orig_join_jiang_wei == 0 -> army_0\n@join jiang_wei\n@label army_0\n\
+             @if orig_away_orig_p88 == 0 -> army_1\n@away orig_p88\n@label army_1\n"
+        );
+    }
 
     fn instr(mnemonic: &'static str, operands: Operands) -> Instr {
         Instr {
