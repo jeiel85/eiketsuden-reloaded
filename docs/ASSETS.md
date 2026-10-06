@@ -259,6 +259,12 @@ it; the engine fills their areas with its own text and pictures.
 
 BGM keys used by the engine and base pack: `title`, `peace`, `tension`, `sad`, `camp`, `battle`, `enemy`,
 `boss`, `victory` (jingle), `defeat` (jingle), `ending`.
+
+Music repeats the whole file, unless the file is an uncompressed WAV whose `smpl` chunk has a forward loop (the first one; a backward or alternating loop is ignored). Then the
+frames before the loop's first frame are an intro played once, and the frames from the first frame to the last
+frame repeat. Frames after the last frame are not played. Most WAV editors can set this loop; the original mode's
+converted songs use it. The switch from the intro to the loop happens between two frames (at least one frame
+late, never overlapping). Ogg files and sound effects always play whole.
 SFX keys used by the engine: `cursor`, `confirm`, `cancel`, `error`, `step`, `hit`, `hit_heavy`, `arrow`, `fire`,
 `water`, `rock`, `heal`, `morale_up`, `morale_down`, `confuse`, `levelup`, `retreat`, `treasure`, `phase`,
 `victory`, `defeat`.

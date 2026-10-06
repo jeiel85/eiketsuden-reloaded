@@ -64,22 +64,31 @@ pub fn songs(file: &[u8]) -> Result<Vec<&[u8]>, String> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rendered {
     pub rate: u32,
+    /// The song from its first step to its loop point, played once before
+    /// [`samples`](Self::samples) (empty without an intro, and when the samples are not
+    /// [`seamless`](Self::seamless)).
+    pub intro: Vec<i16>,
     pub samples: Vec<i16>,
-    /// Whether the samples are one pass of the song's loop, to be repeated without a seam: every
-    /// track loops from the same step. Otherwise they are the song played once from its start.
+    /// Whether the samples are one pass of the song's loop, to be repeated without a seam after
+    /// the intro. Otherwise they are the song played once from its start.
     pub seamless: bool,
-    /// Seconds of the song before its loop point, left out of `samples`: 0 without a loop point
-    /// and when the samples are not [`seamless`](Self::seamless) (they start at the song's start).
+    /// Seconds of the song before its loop point (about the length of the intro): 0 without a
+    /// loop point and when the samples are not [`seamless`](Self::seamless).
     pub intro_seconds: f64,
 }
 
 impl Rendered {
-    /// A RIFF WAVE file of the samples.
+    /// A RIFF WAVE file of the intro and then the samples. With an intro, a `smpl` chunk marks
+    /// where the samples start as the file's loop (the game plays the intro once and repeats
+    /// the rest; other players that know the chunk do the same).
     pub fn wav(&self) -> Vec<u8> {
-        let data_len = (self.samples.len() * 2) as u32;
-        let mut out = Vec::with_capacity(44 + data_len as usize);
+        let frames = self.intro.len() + self.samples.len();
+        let data_len = (frames * 2) as u32;
+        // `smpl`: 36 bytes and one 24-byte loop.
+        let sampler = if self.intro.is_empty() { 0 } else { 8 + 60 };
+        let mut out = Vec::with_capacity(44 + data_len as usize + sampler as usize);
         out.extend(b"RIFF");
-        out.extend((36 + data_len).to_le_bytes());
+        out.extend((36 + data_len + sampler).to_le_bytes());
         out.extend(b"WAVEfmt ");
         out.extend(16u32.to_le_bytes());
         out.extend(1u16.to_le_bytes()); // PCM
@@ -90,8 +99,26 @@ impl Rendered {
         out.extend(16u16.to_le_bytes());
         out.extend(b"data");
         out.extend(data_len.to_le_bytes());
-        for s in &self.samples {
+        for s in self.intro.iter().chain(&self.samples) {
             out.extend(s.to_le_bytes());
+        }
+        if sampler > 0 {
+            // After the samples, where readers that do not know it never look.
+            out.extend(b"smpl");
+            out.extend(60u32.to_le_bytes());
+            out.extend(0u32.to_le_bytes()); // manufacturer
+            out.extend(0u32.to_le_bytes()); // product
+            out.extend((1_000_000_000 / self.rate.max(1)).to_le_bytes()); // ns per sample
+            out.extend(60u32.to_le_bytes()); // MIDI unity note
+            out.extend([0u8; 12]); // pitch fraction, SMPTE format and offset
+            out.extend(1u32.to_le_bytes()); // loops
+            out.extend(0u32.to_le_bytes()); // sampler data
+            out.extend(0u32.to_le_bytes()); // cue point id
+            out.extend(0u32.to_le_bytes()); // forward
+            out.extend((self.intro.len() as u32).to_le_bytes()); // first frame of the loop
+            out.extend((frames as u32 - 1).to_le_bytes()); // its last frame
+            out.extend(0u32.to_le_bytes()); // fraction
+            out.extend(0u32.to_le_bytes()); // forever
         }
         out
     }
@@ -233,12 +260,14 @@ fn dot(w: &[f32], x: &[f32]) -> f32 {
 /// Song steps a second at most (tempo 255 overflows the step accumulator on every timer tick).
 const MAX_STEPS_PER_SECOND: f64 = 1.0 / TIMER_TICK;
 
-/// Render `song` at `rate` Hz for a player that repeats the samples, as the driver loops a song
-/// (`FF` goes back to the track's `FE`, or to its start). When every track loops from the same
-/// step the samples are one pass of the loop, taken from the second time round so the releases
-/// of its end ring into its start as they do in the game; the intro before the loop point is left
-/// out ([`Rendered::intro_seconds`]). Otherwise the song is played once from its start. Longer
-/// than `max_seconds` is an error, and so is a `rate` not below the chip's ([`RATE`]).
+/// Render `song` at `rate` Hz for a player that plays the intro once and repeats the samples, as
+/// the driver loops a song (`FF` goes back to the track's `FE`, or to its start). The song as a
+/// whole repeats from the last track's loop point, every least common multiple of the tracks'
+/// loop lengths: the samples are one pass of that, taken from the second time round so the
+/// releases of its end ring into its start as they do in the game, and the part before it is
+/// [`Rendered::intro`]. When that pass would be longer than `max_seconds`, the song is played
+/// once from its start. Longer than `max_seconds` is an error, and so is a `rate` not below the
+/// chip's ([`RATE`]).
 pub fn render(song: &[u8], rate: u32, max_seconds: f64) -> Result<Rendered, String> {
     render_cancellable(song, rate, max_seconds, &AtomicBool::new(false))
 }
@@ -285,9 +314,11 @@ fn render_checking(
             .iter()
             .any(|c| c.pos.is_some() && c.first_end.is_none())
     };
+    let mut probe_ticks = 0u64;
     while unfinished(&probe) {
         cancelled()?;
         probe.timer_tick();
+        probe_ticks += 1;
         probe.writes.clear();
         if let Some(e) = probe.broken.take() {
             return Err(e);
@@ -298,17 +329,83 @@ fn render_checking(
     }
     let tracks: Vec<&Channel> = probe.channels.iter().filter(|c| c.pos.is_some()).collect();
     let end = tracks.iter().filter_map(|c| c.first_end).max().unwrap_or(0);
-    let loop_step = tracks[0].loop_step;
-    let seamless = tracks
-        .iter()
-        .all(|c| c.first_end == Some(end) && c.loop_step == loop_step);
-    // Recorded from the step `start` is reached until `stop` is.
-    let (start, stop) = if seamless {
-        (end, end + (end - loop_step))
-    } else {
-        (0, end)
+    // Each track repeats its loop from its loop point on, so the song as a whole repeats from
+    // the last track's loop point with the period that fits every track's loop a whole number
+    // of times. A period longer than a song may be (tracks whose loops hardly share a length)
+    // is played once, as a seamless loop of that length could not be recorded. Its seconds are
+    // estimated from the steps of the song's first pass (a tempo that changes within the loop
+    // can make the estimate miss; the recording's own limit still holds).
+    let seconds_per_step = probe_ticks as f64 * TIMER_TICK / probe.steps.max(1) as f64;
+    let joint_start = tracks.iter().map(|c| c.loop_step).max().unwrap_or(1);
+    let period = tracks.iter().try_fold(1u64, |period, c| {
+        let own = c.first_end.unwrap_or(0).saturating_sub(c.loop_step).max(1);
+        lcm(period, own).filter(|&p| p as f64 * seconds_per_step <= max_seconds)
+    });
+    let Some(period) = period else {
+        let (samples, _) = record(song, rate, max_seconds, (0, end), 0, &mut cancelled)?;
+        return Ok(Rendered {
+            rate,
+            intro: Vec::new(),
+            samples,
+            seamless: false,
+            intro_seconds: 0.0,
+        });
     };
+    // The loop from the second time round, so the releases of its end ring into its start as
+    // they do in the game.
+    let window = (joint_start + period, joint_start + 2 * period);
+    let (samples, intro_seconds) =
+        record(song, rate, max_seconds, window, joint_start, &mut cancelled)?;
+    let intro_seconds = intro_seconds.unwrap_or(0.0);
+    // The intro from the first step (the time before it is silence) to the loop point. Its last
+    // notes' releases stop there: the loop starts with the releases of its own end instead,
+    // which the player could not avoid anyway (it switches files between two frames).
+    let intro = if joint_start > 1 {
+        record(
+            song,
+            rate,
+            max_seconds,
+            (1, joint_start),
+            joint_start,
+            &mut cancelled,
+        )?
+        .0
+    } else {
+        Vec::new()
+    };
+    Ok(Rendered {
+        rate,
+        intro,
+        samples,
+        seamless: true,
+        intro_seconds,
+    })
+}
 
+/// Least common multiple (`a`, `b` above 0), `None` past `u64`.
+fn lcm(a: u64, b: u64) -> Option<u64> {
+    fn gcd(a: u64, b: u64) -> u64 {
+        if b == 0 {
+            a
+        } else {
+            gcd(b, a % b)
+        }
+    }
+    (a / gcd(a, b)).checked_mul(b)
+}
+
+/// Play `song` from its start and record its output at `rate` Hz from the song step `start` is
+/// reached (0: from the very start) until `stop` is, together with the seconds from the first
+/// step to the step `loop_step` (`None` when the recording stops before it). Errors as
+/// [`render`] does, and when `cancelled` does.
+fn record(
+    song: &[u8],
+    rate: u32,
+    max_seconds: f64,
+    (start, stop): (u64, u64),
+    loop_step: u64,
+    cancelled: &mut dyn FnMut() -> Result<(), String>,
+) -> Result<(Vec<i16>, Option<f64>), String> {
     let mut driver = Driver::new(song)?;
     let mut chip = Opl2::new();
     for (reg, value) in driver.writes.drain(..) {
@@ -373,16 +470,7 @@ fn render_checking(
             return Err(format!("longer than {max_seconds} s"));
         }
     }
-    Ok(Rendered {
-        rate,
-        samples,
-        seamless,
-        intro_seconds: if seamless {
-            intro_seconds.unwrap_or(0.0)
-        } else {
-            0.0
-        },
-    })
+    Ok((samples, intro_seconds))
 }
 
 /// One music channel of the driver (its 0x30-byte record).
@@ -1269,6 +1357,7 @@ mod tests {
         // The whole song loops: 72 steps at tempo 120 (≈ 96 a second), no intro.
         assert!(rendered.seamless);
         assert_eq!(rendered.intro_seconds, 0.0);
+        assert!(rendered.intro.is_empty());
         let seconds = rendered.samples.len() as f64 / 22050.0;
         assert!((0.72..0.78).contains(&seconds), "{seconds}");
         // A4 sounds for 40 of the note's 48 steps: about 0.42 s of a 440 Hz tone.
@@ -1328,8 +1417,20 @@ mod tests {
         assert!((46.0..50.0).contains(&extra), "{extra}");
     }
 
+    /// The loop's first and last frames in the `smpl` chunk of a WAV file of [`Rendered::wav`].
+    fn wav_loop(wav: &[u8]) -> Option<(u32, u32)> {
+        let data_len = u32::from_le_bytes(wav[40..44].try_into().unwrap()) as usize;
+        let smpl = &wav[44 + data_len..];
+        (smpl.get(..4)? == b"smpl").then(|| {
+            let word = |at: usize| u32::from_le_bytes(smpl[at..at + 4].try_into().unwrap());
+            assert_eq!(word(4), 60);
+            assert_eq!(word(8 + 28), 1, "one loop");
+            (word(8 + 36 + 8), word(8 + 36 + 12))
+        })
+    }
+
     #[test]
-    fn the_loop_is_rendered_without_its_intro() {
+    fn the_intro_is_rendered_before_its_loop() {
         // A4 for 24 steps, the loop point, C5 for 48 steps, the end.
         let rendered = render(
             &song_of(&[&[57, 24, 20, 0xfe, 60, 48, 40, 0xff]]),
@@ -1345,23 +1446,81 @@ mod tests {
         );
         let seconds = rendered.samples.len() as f64 / 22050.0;
         assert!((0.48..0.52).contains(&seconds), "{seconds}");
-        // The samples start with the loop's C5 (523 Hz), not the intro's A4.
+        // The loop starts with C5 (523 Hz), the intro before it is the A4.
         let hz = pitch(&rendered.samples, 0.3);
         assert!((500.0..545.0).contains(&hz), "{hz}");
+        let intro = rendered.intro.len() as f64 / 22050.0;
+        assert!((rendered.intro_seconds - intro).abs() < 0.01, "{intro}");
+        let hz = pitch(&rendered.intro, 0.2);
+        assert!((420.0..460.0).contains(&hz), "{hz}");
+        // One file: the intro, then the loop the `smpl` chunk marks.
+        let wav = rendered.wav();
+        let frames = rendered.intro.len() + rendered.samples.len();
+        assert_eq!(&wav[..4], b"RIFF");
+        assert_eq!(
+            u32::from_le_bytes(wav[4..8].try_into().unwrap()) as usize,
+            wav.len() - 8
+        );
+        assert_eq!(
+            wav_loop(&wav),
+            Some((rendered.intro.len() as u32, frames as u32 - 1))
+        );
+        // A song without an intro has no chunk.
+        assert_eq!(wav_loop(&render(&song(), 22050, 10.0).unwrap().wav()), None);
     }
 
     #[test]
-    fn tracks_looping_from_different_steps_play_once() {
+    fn tracks_looping_from_different_steps_loop_together() {
+        // A4 for 24 steps then a 48-step loop of C5, under a 72-step loop of A3: the song as a
+        // whole repeats from the first's loop point every 144 steps (both loops fit).
         let rendered = render(
             &song_of(&[&[57, 24, 20, 0xfe, 60, 48, 40, 0xff], &[45, 72, 60, 0xff]]),
             22050,
             10.0,
         )
         .unwrap();
+        assert!(rendered.seamless);
+        assert!(
+            (0.23..0.27).contains(&rendered.intro_seconds),
+            "{}",
+            rendered.intro_seconds
+        );
+        let seconds = rendered.samples.len() as f64 / 22050.0;
+        assert!((1.46..1.54).contains(&seconds), "{seconds}");
+    }
+
+    #[test]
+    fn tracks_whose_loops_hardly_fit_play_once() {
+        // Loops of 48 and 47 steps repeat together every 2256 steps (about 23 s): longer than
+        // the limit allows, so the song is played once from its start.
+        let rendered = render(
+            &song_of(&[&[57, 48, 40, 0xff], &[45, 47, 40, 0xff]]),
+            22050,
+            10.0,
+        )
+        .unwrap();
         assert!(!rendered.seamless);
+        assert!(rendered.intro.is_empty());
         assert_eq!(rendered.intro_seconds, 0.0);
         let seconds = rendered.samples.len() as f64 / 22050.0;
-        assert!((0.72..0.78).contains(&seconds), "{seconds}");
+        assert!((0.48..0.52).contains(&seconds), "{seconds}");
+        assert_eq!(wav_loop(&rendered.wav()), None);
+        assert!(
+            render(
+                &song_of(&[&[57, 48, 40, 0xff], &[45, 47, 40, 0xff]]),
+                22050,
+                60.0
+            )
+            .unwrap()
+            .seamless
+        );
+    }
+
+    #[test]
+    fn lcm_of_loop_lengths() {
+        assert_eq!(lcm(48, 72), Some(144));
+        assert_eq!(lcm(1, 7), Some(7));
+        assert_eq!(lcm(u64::MAX, u64::MAX - 1), None);
     }
 
     #[test]
