@@ -471,6 +471,8 @@ DOSBox 등 에뮬레이터로 돌려 본 적도 없다"** 고 적혀 있었다. 
   - 어떤 전투·장면도 쓰지 않는 기본 팩 무장을 `officers.toml`에서 뺀다.
   - 함께 고칠 것: `tools/assets/portraits.toml`, 얼굴 파일, `build.py --check`의 고아 검사(`build.py:88-102`).
   - 먼저 `hero-tools`로 "참조되지 않는 무장" 목록을 뽑는다.
+    (2026-10-06: `hero-tools unused-officers <팩>`을 만들었다. 기본 팩만으로는 118명 중 111명이 나온다: 기본 팩의 전투는
+    시험 전투 하나이고, 명단은 원작 모드 팩이 쓴다. 뺄 무장은 원작 모드 팩에 이 명령을 돌려 정한다. 원작 데이터가 필요해서 남았다.)
 - **M6-3. 일기토 배경을 드라마 시점의 지형으로**
   - `BattleEvent::Drama`에 `terrain: Vec<(officer, terrain)>`을 담는다. 이 값은 `run_action`의 `Drama` 갈래(`flow.rs:376-378`)에서 그 순간에 계산한다.
   - `officer_terrain`(`screens/battle/mod.rs:1984-2004`)은 이벤트에 값이 없을 때만 쓴다.

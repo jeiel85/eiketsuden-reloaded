@@ -42,6 +42,11 @@ USAGE:
     hero-tools info <pack_dir>
         Print a summary of the pack's content.
 
+    hero-tools unused-officers <pack_dir>
+        List the officers that no battle, scene or the campaign's starting army names (by
+        officer id; a scene's speakers and portraits also by display name). A pack that extends
+        this one may still use them: run it on that pack too.
+
     A <pack_dir> whose pack.toml says `extends = \"../base\"` is loaded together with the
     packs it builds on; validate checks media files in every pack of that chain.
 
@@ -97,6 +102,9 @@ pub enum Command {
     Info {
         pack: PathBuf,
     },
+    UnusedOfficers {
+        pack: PathBuf,
+    },
     OriginalProbe {
         dir: PathBuf,
         out: Option<PathBuf>,
@@ -131,6 +139,9 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             pack: only_pack(command, rest)?,
         }),
         "info" => Ok(Command::Info {
+            pack: only_pack(command, rest)?,
+        }),
+        "unused-officers" => Ok(Command::UnusedOfficers {
             pack: only_pack(command, rest)?,
         }),
         "simulate" => parse_simulate(rest),
@@ -385,6 +396,13 @@ mod tests {
                 pack: "data/base".into()
             })
         );
+        assert_eq!(
+            parse_str(&["unused-officers", "data/base"]),
+            Ok(Command::UnusedOfficers {
+                pack: "data/base".into()
+            })
+        );
+        assert!(parse_str(&["unused-officers"]).is_err());
         assert_eq!(parse_str(&["--help"]), Ok(Command::Help));
         assert_eq!(parse_str(&["help"]), Ok(Command::Help));
         assert_eq!(parse_str(&["--version"]), Ok(Command::Version));
