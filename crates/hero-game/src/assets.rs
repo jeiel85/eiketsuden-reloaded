@@ -12,7 +12,7 @@
 //! | kind | key example | file |
 //! |---|---|---|
 //! | texture | `portraits/liu_bei`, `bg/palace`, `units/archer_player`, `ui/title` | `gfx/<key>.png` |
-//! | sound | `bgm/title` | `bgm/title.ogg` |
+//! | sound | `bgm/title` | `bgm/title.ogg`, else `bgm/title.wav` (a loop start in its `smpl` chunk: [`Media::intro`]) |
 //! | sound | `sfx/cursor` | `sfx/cursor.wav`, else `sfx/cursor.ogg` |
 //! | icon | `gold` | cell of `gfx/ui/icons.png` listed in `gfx/ui/icons.toml` |
 //!
@@ -308,7 +308,7 @@ enum Stage {
     Fetch(BoxFuture<BytesResult>),
     Decode(Vec<u8>),
     DecodeSound {
-        future: BoxFuture<Result<Sound, macroquad::Error>>,
+        future: BoxFuture<Result<Decoded, macroquad::Error>>,
         started: f64,
     },
 }
@@ -357,6 +357,8 @@ pub const PUBLIC_SUFFIX: &str = "#public";
 struct Inner {
     textures: HashMap<String, Slot<Texture2D>>,
     sounds: HashMap<String, Slot<Sound>>,
+    /// Intros of the ready music in `sounds` that has a loop start, and their seconds.
+    intros: HashMap<String, (Sound, f64)>,
     icons: Option<Slot<IconIndex>>,
     jobs: VecDeque<Job>,
 }
@@ -531,12 +533,20 @@ impl Media {
         self.request_sound(key)
     }
 
+    /// The part of music `key` before its loop and its seconds, when its file marks where the
+    /// loop starts: [`sound`](Self::sound) is then only the loop, played after the intro.
+    /// `None` without a loop start and while the music is not ready. Requests nothing.
+    pub fn intro(&self, key: &str) -> Option<(Sound, f64)> {
+        self.inner.borrow().intros.get(key).cloned()
+    }
+
     /// Forget a loaded sound so its memory can be freed once nothing plays it any more. A later
     /// request loads it again.
     pub fn release_sound(&self, key: &str) {
         let mut inner = self.inner.borrow_mut();
         if matches!(inner.sounds.get(key), Some(Slot::Ready(_))) {
             inner.sounds.remove(key);
+            inner.intros.remove(key);
         }
     }
 
@@ -549,6 +559,7 @@ impl Media {
             return false;
         }
         inner.sounds.remove(key);
+        inner.intros.remove(key);
         true
     }
 
@@ -647,15 +658,31 @@ impl Media {
                 Stage::Fetch(fut) => {
                     let result = poll_once(fut)?;
                     match (result, &job.kind) {
-                        (Ok(bytes), JobKind::Sound { .. }) => {
+                        (Ok(bytes), JobKind::Sound { key }) => {
                             let bytes = match prepare_sound(bytes) {
                                 Ok(bytes) => bytes,
                                 Err(e) => return Some(Outcome::Failed(e)),
                             };
+                            // Only music loops after an intro: an effect plays its whole file.
+                            let split = key
+                                .starts_with("bgm/")
+                                .then(|| split_loop(&bytes))
+                                .flatten();
+                            let (intro, bytes) = match split {
+                                Some(split) => (split.intro, split.looped),
+                                None => (None, bytes),
+                            };
                             job.stage = Stage::DecodeSound {
-                                future: Box::pin(
-                                    async move { load_sound_from_bytes(&bytes).await },
-                                ),
+                                future: Box::pin(async move {
+                                    let intro = match intro {
+                                        Some((intro, seconds)) => {
+                                            Some((load_sound_from_bytes(&intro).await?, seconds))
+                                        }
+                                        None => None,
+                                    };
+                                    let sound = load_sound_from_bytes(&bytes).await?;
+                                    Ok(Decoded { sound, intro })
+                                }),
                                 started: get_time(),
                             };
                         }
@@ -698,7 +725,7 @@ impl Media {
                 Stage::DecodeSound { future, started } => {
                     if let Some(result) = poll_once(future) {
                         return Some(match result {
-                            Ok(sound) => Outcome::Sound(sound),
+                            Ok(decoded) => Outcome::Sound(decoded),
                             Err(e) => Outcome::Failed(describe_error(&e)),
                         });
                     }
@@ -716,8 +743,12 @@ impl Media {
             (JobKind::Texture { key }, Outcome::Texture(t)) => {
                 inner.textures.insert(key, Slot::Ready(t));
             }
-            (JobKind::Sound { key, .. }, Outcome::Sound(s)) => {
-                inner.sounds.insert(key, Slot::Ready(s));
+            (JobKind::Sound { key, .. }, Outcome::Sound(decoded)) => {
+                match decoded.intro {
+                    Some(intro) => inner.intros.insert(key.clone(), intro),
+                    None => inner.intros.remove(&key),
+                };
+                inner.sounds.insert(key, Slot::Ready(decoded.sound));
             }
             (JobKind::IconIndex, Outcome::Icons(index)) => inner.icons = Some(Slot::Ready(index)),
             (kind, Outcome::Failed(why)) => {
@@ -755,11 +786,111 @@ impl Media {
     }
 }
 
+/// A decoded sound file: music with a loop start is its loop and the intro before it.
+struct Decoded {
+    sound: Sound,
+    intro: Option<(Sound, f64)>,
+}
+
 enum Outcome {
     Texture(Texture2D),
-    Sound(Sound),
+    Sound(Decoded),
     Icons(IconIndex),
     Failed(String),
+}
+
+/// A music file split where its loop starts ([`split_loop`]).
+#[derive(Debug, Clone, PartialEq)]
+struct LoopSplit {
+    /// The part before the loop as a WAV file, and its seconds (`None` when the loop starts at
+    /// the first frame).
+    intro: Option<(Vec<u8>, f64)>,
+    /// The loop as a WAV file.
+    looped: Vec<u8>,
+}
+
+/// Split a music file at the loop its `smpl` chunk marks (the first loop).
+///
+/// * Input: the bytes of a sound file.
+/// * Output: the intro and the loop as two WAV files, or `None` to play the file as it is: not
+///   an uncompressed WAV file, no `smpl` loop, a loop over every frame, or a loop that does not
+///   fit the samples (ignored rather than refused, as a player that does not know the chunk
+///   would).
+/// * Why: macroquad 0.4 repeats only whole sounds, so the audio manager plays the intro once
+///   and then repeats the loop as a sound of its own ([`crate::audio`]). One file with the
+///   chunk, rather than a separate intro file, so music without an intro costs no extra
+///   lookups (a failed one is a 404 and a warning on the web), a song the original mode adds
+///   while the game runs replaces both parts at once, and WAV editors can set the point.
+///   Frames after the loop's end are left out (a release tail no repeat plays). The intro's
+///   length comes from its frames, so the switch needs no decoder's report.
+fn split_loop(bytes: &[u8]) -> Option<LoopSplit> {
+    let u16_at =
+        |b: &[u8], at: usize| Some(u16::from_le_bytes(b.get(at..at + 2)?.try_into().ok()?));
+    let u32_at =
+        |b: &[u8], at: usize| Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?));
+    if bytes.get(..4)? != b"RIFF" || bytes.get(8..12)? != b"WAVE" {
+        return None;
+    }
+    let (mut fmt, mut data, mut sampler) = (None, None, None);
+    let mut at = 12;
+    while bytes.len().saturating_sub(at) >= 8 {
+        let size = u32_at(bytes, at + 4)? as usize;
+        // A cut file's last chunk keeps what is there.
+        let body = &bytes[at + 8..(at + 8).saturating_add(size).min(bytes.len())];
+        match &bytes[at..at + 4] {
+            b"fmt " => fmt = Some(body),
+            b"data" => data = Some(body),
+            b"smpl" => sampler = Some(body),
+            _ => {}
+        }
+        // Chunks are padded to an even length.
+        at = at
+            .saturating_add(8)
+            .saturating_add(size)
+            .saturating_add(size & 1);
+    }
+    let (fmt, data, sampler) = (fmt?, data?, sampler?);
+    // PCM, IEEE float or extensible: whole frames of `block_align` bytes.
+    if ![1, 3, 0xfffe].contains(&u16_at(fmt, 0)?) {
+        return None;
+    }
+    let rate = u32_at(fmt, 4)?;
+    let block = usize::from(u16_at(fmt, 12)?);
+    if rate == 0 || block == 0 || u32_at(sampler, 28)? == 0 {
+        return None;
+    }
+    let first = u32_at(sampler, 36 + 8)? as usize;
+    let last = u32_at(sampler, 36 + 12)? as usize;
+    let frames = data.len() / block;
+    let end = last.saturating_add(1).min(frames);
+    if first >= end || (first == 0 && end == frames) {
+        return None;
+    }
+    let wav = |samples: &[u8]| {
+        let mut out = Vec::with_capacity(28 + fmt.len() + samples.len());
+        let pad = samples.len() & 1;
+        out.extend(b"RIFF");
+        out.extend(
+            ((4 + 8 + fmt.len() + (fmt.len() & 1) + 8 + samples.len() + pad) as u32).to_le_bytes(),
+        );
+        out.extend(b"WAVEfmt ");
+        out.extend((fmt.len() as u32).to_le_bytes());
+        out.extend(fmt);
+        if fmt.len() & 1 == 1 {
+            out.push(0);
+        }
+        out.extend(b"data");
+        out.extend((samples.len() as u32).to_le_bytes());
+        out.extend(samples);
+        if pad == 1 {
+            out.push(0);
+        }
+        out
+    };
+    Some(LoopSplit {
+        intro: (first > 0).then(|| (wav(&data[..first * block]), first as f64 / f64::from(rate))),
+        looped: wav(&data[first * block..end * block]),
+    })
 }
 
 /// Make a sound file safe for macroquad's native audio backend; returns the bytes to decode.
@@ -955,8 +1086,9 @@ mod tests {
     #[test]
     fn the_original_modes_rendered_music_plays() {
         // The WAV the original-mode converter writes for the original's songs.
-        let rendered = hero_import::music::Rendered {
+        let mut rendered = hero_import::music::Rendered {
             rate: hero_import::pack::MUSIC_RATE,
+            intro: Vec::new(),
             samples: (0..2205)
                 .map(|i| ((i % 50) * 500 - 12_000) as i16)
                 .collect(),
@@ -968,6 +1100,83 @@ mod tests {
         assert!(!quad_snd_panics(&bytes));
         let (channels, rate, samples) = decode(&bytes);
         assert_eq!((channels, rate, samples.len()), (1, 22_050, 2205));
+        assert_eq!(split_loop(&bytes), None, "no intro: the file is the loop");
+
+        // With an intro: the decoder skips the `smpl` chunk after the samples, and the media
+        // store splits the file there.
+        rendered.intro = vec![1000; 441];
+        rendered.intro_seconds = 0.02;
+        let bytes = rendered.wav();
+        assert_eq!(prepare_sound(bytes.clone()), Ok(bytes.clone()));
+        assert!(!quad_snd_panics(&bytes));
+        assert_eq!(decode(&bytes).2.len(), 441 + 2205);
+        let split = split_loop(&bytes).expect("a loop start");
+        let (intro, seconds) = split.intro.expect("an intro");
+        assert_eq!(seconds, 0.02);
+        for (part, frames, first) in [(&intro, 441, 1000), (&split.looped, 2205, -12_000)] {
+            assert!(!quad_snd_panics(part));
+            let (channels, rate, samples) = decode(part);
+            assert_eq!((channels, rate, samples.len()), (1, 22_050, frames));
+            assert_eq!((samples[0] * 32768.0).round() as i32, first);
+        }
+    }
+
+    /// `wav` with a `smpl` chunk of one loop from frame `first` to frame `last`, before or
+    /// after the samples.
+    fn looped_wav(wav: &[u8], first: u32, last: u32, before: bool) -> Vec<u8> {
+        let mut chunk = b"smpl".to_vec();
+        chunk.extend(60u32.to_le_bytes());
+        chunk.extend([0u8; 28]);
+        chunk.extend(1u32.to_le_bytes());
+        chunk.extend([0u8; 12]);
+        chunk.extend(first.to_le_bytes());
+        chunk.extend(last.to_le_bytes());
+        chunk.extend([0u8; 8]);
+        let mut out = wav.to_vec();
+        let at = if before { 36 } else { out.len() };
+        out.splice(at..at, chunk);
+        let riff = (out.len() - 8) as u32;
+        out[4..8].copy_from_slice(&riff.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn music_splits_at_its_loop_start() {
+        // Stereo: frames of four bytes. Loop over frames 100..=399 of 500, the chunk anywhere.
+        let plain = wav(2, 8000, 500);
+        for before in [false, true] {
+            let split = split_loop(&looped_wav(&plain, 100, 399, before)).unwrap();
+            let (intro, seconds) = split.intro.unwrap();
+            assert_eq!(seconds, 100.0 / 8000.0);
+            assert_eq!(&intro[44..], &plain[44..44 + 400]);
+            assert_eq!(
+                &split.looped[44..],
+                &plain[44 + 400..44 + 1600],
+                "the tail left out"
+            );
+            assert_eq!(&intro[..4], b"RIFF");
+            assert_eq!(&intro[22..24], &2u16.to_le_bytes(), "the format is kept");
+            assert_eq!(decode(&split.looped).2.len(), 2 * 300);
+        }
+        // A loop from the first frame that stops early: the tail only.
+        let split = split_loop(&looped_wav(&plain, 0, 249, false)).unwrap();
+        assert_eq!(split.intro, None);
+        assert_eq!(decode(&split.looped).2.len(), 2 * 250);
+        // An end past the samples is the last frame.
+        let split = split_loop(&looped_wav(&plain, 100, 9999, false)).unwrap();
+        assert_eq!(decode(&split.looped).2.len(), 2 * 400);
+        // Played as they are: no chunk, a loop over everything, a start past the samples, a
+        // loop that ends before it starts, an effect-like file that is not WAV.
+        assert_eq!(split_loop(&plain), None);
+        assert_eq!(split_loop(&looped_wav(&plain, 0, 499, false)), None);
+        assert_eq!(split_loop(&looped_wav(&plain, 500, 600, false)), None);
+        assert_eq!(split_loop(&looped_wav(&plain, 300, 200, false)), None);
+        assert_eq!(split_loop(&base_pack_file("bgm/victory.ogg")), None);
+        // Cut short anywhere, it never panics.
+        let full = looped_wav(&plain, 100, 399, false);
+        for len in 0..full.len() {
+            let _ = split_loop(&full[..len]);
+        }
     }
 
     #[test]

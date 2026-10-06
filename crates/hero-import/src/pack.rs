@@ -870,15 +870,16 @@ pub fn render_music(
     }
 }
 
-/// Note of a song whose tracks loop from different places ([`crate::music::render`]).
+/// Note of a song whose tracks' loops do not repeat together within the length a song may
+/// have ([`crate::music::render`]).
 const SEAMED: &str = concat!(
-    "; its tracks loop from different places, so it is played once from the start and",
+    "; its tracks' loops hardly fit together, so it is played once from the start and",
     " repeats with a seam"
 );
 
-/// The original's songs of [`MUSIC_KEYS`] rendered as `bgm/<key>.wav` (one pass of each song's
-/// loop, which the game repeats; see [`crate::music::render`]), standing in for the base pack's
-/// `bgm/<key>.ogg`.
+/// The original's songs of [`MUSIC_KEYS`] rendered as `bgm/<key>.wav` (each song's intro and one
+/// pass of its loop, which the game repeats after the intro; see [`crate::music::render`]),
+/// standing in for the base pack's `bgm/<key>.ogg`.
 fn convert_music(
     install: &InstallDir,
     options: &PackOptions,
@@ -905,13 +906,11 @@ fn convert_music(
             match rendered {
                 Ok(r) => {
                     let length = r.samples.len() as f64 / f64::from(MUSIC_RATE);
-                    seconds += length;
-                    let how = match (r.seamless, r.intro_seconds > 0.0) {
-                        (true, false) => String::new(),
-                        (true, true) => format!(
-                            "; its loop only, the {:.1} s intro before it left out",
-                            r.intro_seconds
-                        ),
+                    let intro = r.intro.len() as f64 / f64::from(MUSIC_RATE);
+                    seconds += intro + length;
+                    let how = match (r.seamless, r.intro.is_empty()) {
+                        (true, true) => String::new(),
+                        (true, false) => format!("; a {intro:.1} s intro played once before it"),
                         (false, _) => SEAMED.into(),
                     };
                     notes.push(format!("{key}: {file} song {index}, {length:.0} s{how}"));
