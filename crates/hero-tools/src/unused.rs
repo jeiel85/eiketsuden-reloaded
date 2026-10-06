@@ -18,11 +18,12 @@ pub fn run(dir: &Path) -> Result<bool, String> {
 /// * Output: the ids of `officers.toml` named by the campaign's starting army, a battle (its
 ///   units, `deploy.required`/`forbidden`, and the unit references of its conditions, events
 ///   and `ai_target`s, which may be officer ids) or a scene (speakers, portraits, `@join`,
-///   `@leave`, `@away`, `@level`, `@class`, `@duel`).
-/// * Why: removing an officer nothing uses is safe for the pack; one that only looks unused
-///   by name (a speaker written as a display name) is not counted, as the game does not tie
-///   that line to the officer either. Every `Cmd` is matched without a catch-all, so a new
-///   command that names an officer cannot be forgotten here.
+///   `@leave`, `@away`, `@level`, `@class`, `@duel`). Speakers and `@show` names count by id
+///   or by display name, as [`Pack::speaker_officer`] resolves them.
+/// * Why: removing an officer nothing uses is safe for the pack. A scene that writes a speaker
+///   by display name (`관우: …`) still shows that officer's name and portrait (the drama runner
+///   resolves it the same way), so it is a use. Every `Cmd` is matched without a catch-all, so
+///   a new command that names an officer cannot be forgotten here.
 pub fn used_officers(pack: &Pack) -> BTreeSet<&str> {
     let mut used: BTreeSet<&str> = BTreeSet::new();
     let mut name = |id: &str| {
@@ -54,9 +55,12 @@ pub fn used_officers(pack: &Pack) -> BTreeSet<&str> {
     for scene in pack.scenes.values() {
         for cmd in &scene.cmds {
             match cmd {
-                Cmd::Say { speaker: who, .. }
-                | Cmd::Show { who, .. }
-                | Cmd::Join(who)
+                Cmd::Say { speaker: who, .. } | Cmd::Show { who, .. } => {
+                    if let Some(o) = pack.speaker_officer(who) {
+                        name(&o.id);
+                    }
+                }
+                Cmd::Join(who)
                 | Cmd::Leave(who)
                 | Cmd::Away(who)
                 | Cmd::Level { officer: who, .. }
@@ -135,7 +139,7 @@ mod tests {
     fn every_way_of_naming_an_officer_counts() {
         let mut pack = pack("../hero-core/tests/fixtures/mini");
         let ids: Vec<String> = pack.officers.keys().cloned().collect();
-        assert!(ids.len() >= 2, "{ids:?}");
+        assert!(ids.len() >= 3, "{ids:?}");
         // Nothing names anyone: every officer is unused.
         pack.campaign.starting_officers.clear();
         pack.battles.clear();
@@ -144,11 +148,13 @@ mod tests {
         assert!(
             render(&pack).starts_with(&format!("{n} of {n} officers are not used", n = ids.len()))
         );
-        // A speaker, a portrait or an event's target names one; a display name does not.
+        // A speaker by id, a portrait by id and a speaker by display name each name one (the
+        // drama runner shows that officer's portrait for all three); a free name does not.
+        let display = pack.officers[&ids[2]].name.clone();
         let scene = hero_core::script::parse_drama(
             "t.drama",
             &format!(
-                "== s\n{}: 안녕\n@show {} left\n관우: 이름만\n",
+                "== s\n{}: 안녕\n@show {} left\n{display}: 이름으로\n아무개: 지나가는 사람\n",
                 ids[0], ids[1]
             ),
         )
@@ -157,7 +163,7 @@ mod tests {
         pack.scenes.insert(scene.id.clone(), scene);
         assert_eq!(
             used_officers(&pack),
-            BTreeSet::from([ids[0].as_str(), ids[1].as_str()])
+            BTreeSet::from([ids[0].as_str(), ids[1].as_str(), ids[2].as_str()])
         );
         let report = render(&pack);
         assert!(!report.contains(&format!("  {} (", ids[0])), "{report}");

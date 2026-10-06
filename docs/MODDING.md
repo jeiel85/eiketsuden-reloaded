@@ -1268,11 +1268,12 @@ hero-tools --help | --version
 * **info** — prints the pack's name, the packs it extends, licence, canvas size and how many terrain
   types, classes, strategies, items, officers, battles, scenes (with the number of dialogue lines) and
   campaign nodes it has.
-* **unused-officers** — lists the officers (id and name) that nothing in the pack names by id: the campaign's
+* **unused-officers** — lists the officers (id and name) that nothing in the pack names: the campaign's
   starting army, a battle's units, `deploy.required`/`forbidden`, condition and event references and
-  `ai_target`s, and a scene's speakers, portraits, `@join`/`@leave`/`@away`/`@level`/`@class` and `@duel`. A
-  speaker written as a display name does not count. A pack that extends the one checked may still use them, so
-  run it on the pack you play (for the base pack's roster: the original mode's pack).
+  `ai_target`s, and a scene's speakers, portraits, `@join`/`@leave`/`@away`/`@level`/`@class` and `@duel`.
+  Speakers and portraits count by officer id or by display name, as scenes resolve them. A pack that extends
+  the one checked may still use them, so run it on the pack you play (for the base pack's roster: the
+  original mode's pack).
 * **simulate** — refuses packs with validation errors, then plays every battle (campaign order first, then
   battles the campaign does not use; or only `--battle ID`) AI against AI with seeds `1..=N` (default 4),
   for at most 200 phases each. The player army is a new game's starting army plus the battle's required
