@@ -159,3 +159,15 @@ def field_patch(rng: random.Random) -> Image.Image:
     for y in range(1, 8, 2):
         d.line([(1, y), (12, y)], fill=rgba("#b8a84a"))
     return outlined(img, rgba("#5a4a24"))
+
+
+def gate() -> Image.Image:
+    """A closed wooden gate set into a wall's face, 22×22 with its outline."""
+    img, d = blank(22, 22)
+    d.rectangle((2, 3, 19, 20), fill=(90, 56, 30, 255))
+    d.line([(11, 3), (11, 20)], fill=(50, 30, 16, 255))
+    for y in (7, 13, 18):
+        d.line([(2, y), (19, y)], fill=(60, 40, 22, 255))
+    d.point((9, 12), fill=(224, 184, 72, 255))
+    d.point((13, 12), fill=(224, 184, 72, 255))
+    return outlined(img)

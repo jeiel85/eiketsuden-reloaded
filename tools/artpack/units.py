@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from PIL import Image, ImageDraw
+
 from sprites import SHADOW, blank, outlined, rgba
 
 SIDE_CLOTH = {

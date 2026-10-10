@@ -204,3 +204,9 @@ It uses the Ninja Adventure colour palette. The same applies to the images the p
 itself: the fallback portrait `gfx/portraits/_unknown.png` (`tools/assets/build_portraits.py`) and
 `gfx/bg/black.png`, and the application icon (`crates/hero-game/icon/`, drawn by
 `tools/assets/build_icon.py`: the web page's banner favicon as pixel art).
+
+The original mode's new art (`docs/DECISIONS.md` D27) is made for this project too and is CC0: the unit
+sprites and map objects drawn by `tools/artpack/` (`units.py`, `sprites.py`) into
+`crates/hero-import/assets/remake/`, and the code in `crates/hero-import/src/remake.rs` that draws the
+battle maps with them. The map pictures it draws at conversion time follow the original's map layouts,
+so like the rest of the converted pack they stay on the player's computer.

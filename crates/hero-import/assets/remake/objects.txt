@@ -1,0 +1,19 @@
+# name x y w h — written by tools/artpack/build.py (CC0); do not edit
+tree0 0 0 16 20
+tree1 32 0 16 20
+broadleaf 64 0 18 18
+peak_big0 96 0 26 22
+peak_big1 128 0 26 22
+peak_big2 160 0 26 22
+peak_small0 192 0 18 15
+peak_small1 224 0 18 15
+peak_small2 0 32 18 15
+house_blue 32 32 22 20
+house_red 64 32 22 20
+house_brown 96 32 22 20
+field 128 32 14 9
+tent 160 32 24 22
+gatehouse 192 32 28 26
+granary 224 32 24 20
+treasury 0 64 24 20
+gate 32 64 22 22

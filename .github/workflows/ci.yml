@@ -69,14 +69,16 @@ jobs:
         run: pip install pillow "fonttools[woff]==4.66.0" ruff==0.16.9
       - name: Lint
         run: |
-          ruff check tools/assets tools/web
-          ruff format --check tools/assets tools/web
+          ruff check tools/assets tools/web tools/artpack
+          ruff format --check tools/assets tools/web tools/artpack
       - name: Unit tests
         run: |
           python -m unittest discover -s tools/assets -p "test_*.py"
           python -m unittest discover -s tools/web -p "test_*.py"
       - name: Application icon matches its script
         run: python tools/assets/build_icon.py --check
+      - name: New-art atlases match their scripts (D27)
+        run: python tools/artpack/build.py --check
 
   native:
     strategy:

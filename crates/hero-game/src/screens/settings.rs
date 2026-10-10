@@ -1,6 +1,6 @@
 //! Settings overlay: volumes, text speed, battle animation speed, fullscreen (native), and the
 //! view-only choices beyond the original (`docs/DECISIONS.md` D25: portraits, danger range,
-//! battle presentation), which all start at the original's look.
+//! battle presentation; D27: map and unit art), which all start at the original's look.
 //!
 //! Values change with left/right, the ◀ ▶ arrows or confirm (steps forward) and apply
 //! immediately (the effect volume plays a sample); leaving the screen persists them through
@@ -9,7 +9,7 @@
 use crate::app::{Ctx, Screen, Transition};
 use crate::audio::sfx;
 use crate::gfx::{fill_rect, Align, TextStyle};
-use crate::settings::{cycle, BattleFx, BattleSpeed, PortraitStyle, Settings, TextSpeed};
+use crate::settings::{cycle, ArtStyle, BattleFx, BattleSpeed, PortraitStyle, Settings, TextSpeed};
 use crate::ui::format;
 use crate::ui::menu::{Menu, MenuEvent, MenuItem};
 use crate::ui::theme;
@@ -27,6 +27,8 @@ enum Row {
     /// The quick save slot of F5 / F9 and the menus' 순간 저장 (also F6).
     QuickSlot,
     Portraits,
+    /// The original's or the new map and unit art (D27).
+    Art,
     DangerRange,
     BattleFx,
     Defaults,
@@ -56,6 +58,7 @@ impl SettingsScreen {
         rows.extend([
             Row::QuickSlot,
             Row::Portraits,
+            Row::Art,
             Row::DangerRange,
             Row::BattleFx,
         ]);
@@ -68,10 +71,12 @@ impl SettingsScreen {
         }
     }
 
-    /// Input: the settings and whether the chain holds the original mode's pack below the top
-    /// ([`crate::platform::DataRoot::has_original_layer`]). Without one (the web build, the
-    /// base pack alone) the face choice changes nothing, so its row is shown disabled.
-    fn items(&self, s: &Settings, faces: bool) -> Vec<MenuItem> {
+    /// Input: the settings, whether the chain holds the original mode's pack below the top
+    /// ([`crate::platform::DataRoot::has_original_layer`]) and whether this launch's conversion
+    /// left out the new art's maps (`Ctx::remake_maps_missing`). Without an original pack (the
+    /// web build, the base pack alone) the face and art choices change nothing, so their rows
+    /// are shown disabled.
+    fn items(&self, s: &Settings, faces: bool, maps_missing: bool) -> Vec<MenuItem> {
         self.rows
             .iter()
             .map(|row| match row {
@@ -102,6 +107,13 @@ impl SettingsScreen {
                 Row::Portraits => MenuItem::new("얼굴")
                     .detail(s.portraits.label())
                     .adjustable(),
+                Row::Art if !faces => MenuItem::new("그림")
+                    .detail("원작 데이터 없음")
+                    .enabled(false),
+                Row::Art if s.art == ArtStyle::Remake && maps_missing => MenuItem::new("그림")
+                    .detail("새 그림 · 맵은 재시작 후")
+                    .adjustable(),
+                Row::Art => MenuItem::new("그림").detail(s.art.label()).adjustable(),
                 Row::DangerRange => MenuItem::new("위험 범위")
                     .detail(if s.danger_range { "켬" } else { "끔" })
                     .adjustable(),
@@ -115,7 +127,11 @@ impl SettingsScreen {
     }
 
     fn refresh(&mut self, ctx: &Ctx) {
-        let items = self.items(&ctx.settings, ctx.data_root.has_original_layer());
+        let items = self.items(
+            &ctx.settings,
+            ctx.data_root.has_original_layer(),
+            ctx.remake_maps_missing,
+        );
         self.menu.set_items(items);
     }
 
@@ -138,6 +154,7 @@ impl SettingsScreen {
                 s.quick_slot = cycle(&slots, s.quick_slot, delta);
             }
             Row::Portraits => s.portraits = cycle(&PortraitStyle::ALL, s.portraits, delta),
+            Row::Art => s.art = cycle(&ArtStyle::ALL, s.art, delta),
             Row::DangerRange => s.danger_range = !s.danger_range,
             Row::BattleFx => s.battle_fx = cycle(&BattleFx::ALL, s.battle_fx, delta),
             Row::Defaults | Row::Back => return,
@@ -175,7 +192,11 @@ impl Screen for SettingsScreen {
     }
 
     fn on_enter(&mut self, ctx: &mut Ctx, _how: crate::app::Enter) {
-        let items = self.items(&ctx.settings, ctx.data_root.has_original_layer());
+        let items = self.items(
+            &ctx.settings,
+            ctx.data_root.has_original_layer(),
+            ctx.remake_maps_missing,
+        );
         self.menu = placed(items, ctx.gfx.size());
     }
 
@@ -233,15 +254,21 @@ impl Screen for SettingsScreen {
     }
 }
 
+/// Height of the storage location line at the bottom of the canvas.
+const STORAGE_LINE: f32 = 16.0;
+
 /// The settings menu of `items` on a `canvas`: the window (menu plus its heading, see
-/// [`window_rect`]) centred on it.
+/// [`window_rect`]) centred in the space above the storage location line.
 fn placed(items: Vec<MenuItem>, canvas: Vec2) -> Menu {
     let mut menu = Menu::new(items);
     menu.framed = false;
-    let h = menu.rect().h;
+    let window_h = menu.rect().h + 32.0;
     menu.set_position(
         ((canvas.x - WIDTH) / 2.0).round() + 6.0,
-        ((canvas.y - h) / 2.0).round() + 10.0,
+        ((canvas.y - STORAGE_LINE - window_h) / 2.0)
+            .round()
+            .max(0.0)
+            + 26.0,
     );
     menu.set_width(WIDTH - 12.0);
     menu
@@ -266,7 +293,7 @@ mod tests {
         }
         assert!(screen.rows.contains(&Row::QuickSlot));
         let canvas = crate::gfx::DEFAULT_CANVAS;
-        let menu = placed(screen.items(&Settings::default(), true), canvas);
+        let menu = placed(screen.items(&Settings::default(), true, false), canvas);
         let window = window_rect(menu.rect());
         assert!(window.y >= 0.0, "{window:?}");
         // The storage line takes the last 16 pixels.
@@ -283,7 +310,10 @@ mod tests {
             .position(|&r| r == Row::QuickSlot)
             .unwrap();
         let mut s = Settings::default();
-        assert_eq!(screen.items(&s, true)[at].detail.as_deref(), Some("1 / 4"));
+        assert_eq!(
+            screen.items(&s, true, false)[at].detail.as_deref(),
+            Some("1 / 4")
+        );
         let slots: Vec<u8> = (1..=crate::saves::QUICK_SLOTS).collect();
         assert_eq!(cycle(&slots, 1, -1), 4);
         s.next_quick_slot();
@@ -302,11 +332,35 @@ mod tests {
             .position(|&r| r == Row::Portraits)
             .unwrap();
         let s = Settings::default();
-        let off = &screen.items(&s, false)[at];
+        let off = &screen.items(&s, false, false)[at];
         assert!(!off.enabled && !off.adjustable);
         assert_eq!(off.detail.as_deref(), Some("원작 데이터 없음"));
-        let on = &screen.items(&s, true)[at];
+        let on = &screen.items(&s, true, false)[at];
         assert!(on.enabled && on.adjustable);
         assert_eq!(on.detail.as_deref(), Some(s.portraits.label()));
+    }
+
+    /// The art row (D27): disabled without an original layer; with the new art chosen after a
+    /// conversion that left out its maps, it says the maps follow at the next launch.
+    #[test]
+    fn the_art_row_says_when_the_maps_follow() {
+        let screen = SettingsScreen::new();
+        let at = screen.rows.iter().position(|&r| r == Row::Art).unwrap();
+        let mut s = Settings::default();
+        let off = &screen.items(&s, false, false)[at];
+        assert!(!off.enabled);
+        assert_eq!(off.detail.as_deref(), Some("원작 데이터 없음"));
+        assert_eq!(
+            screen.items(&s, true, true)[at].detail.as_deref(),
+            Some("원작")
+        );
+        s.art = ArtStyle::Remake;
+        assert_eq!(
+            screen.items(&s, true, false)[at].detail.as_deref(),
+            Some("새 그림")
+        );
+        let pending = &screen.items(&s, true, true)[at];
+        assert!(pending.adjustable);
+        assert_eq!(pending.detail.as_deref(), Some("새 그림 · 맵은 재시작 후"));
     }
 }

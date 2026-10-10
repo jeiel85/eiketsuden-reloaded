@@ -318,6 +318,10 @@ pub struct BattleScreen {
     shown_tiles: Vec<MapImage>,
     /// The map was drawn from the tileset before a terrain change; rebuild it.
     map_stale: bool,
+    /// The "그림" setting (D27) the map's picture layer was loaded with: the picture is baked
+    /// into [`MapRenderer`], so a change in the settings overlay reloads it
+    /// ([`BattleScreen::follow_art_setting`]). `None` until a picture is used.
+    picture_art: Option<crate::settings::ArtStyle>,
     /// Tiles the enemies could attack next phase (the "위험 범위" view option, D25 X4) with the
     /// [`player::danger_key`] they were computed for; refreshed only when that changes.
     danger: Option<(Vec<i64>, Vec<Pos>)>,
@@ -455,6 +459,7 @@ impl BattleScreen {
             start_levels: state.units.iter().map(|u| u.level).collect(),
             shown_tiles: state.map_images.clone(),
             map_stale: false,
+            picture_art: None,
             danger: None,
             state,
         }
@@ -604,6 +609,7 @@ impl BattleScreen {
                             let size = vec2(picture.width(), picture.height());
                             if self.map.fits(size) {
                                 self.map.use_picture(picture);
+                                self.picture_art = Some(ctx.settings.art);
                                 return;
                             }
                             macroquad::logging::warn!(
@@ -643,6 +649,23 @@ impl BattleScreen {
     }
 
     // ----- helpers -----------------------------------------------------------------------
+
+    /// The "그림" setting changed since the map's picture layer was loaded (in the settings
+    /// overlay): load the picture of the new choice. The cell pictures and units follow by
+    /// themselves, because they are fetched from the media store every frame.
+    fn follow_art_setting(&mut self, art: crate::settings::ArtStyle) {
+        if self.picture_art.is_none_or(|used| used == art) {
+            return;
+        }
+        self.picture_art = None;
+        self.map = MapRenderer::new(&self.state.map, self.map.tile);
+        self.meta.picture = self
+            .def()
+            .map
+            .image
+            .as_ref()
+            .map(|key| format!("maps/{key}"));
+    }
 
     /// Size of a map tile in virtual pixels (the tileset's `tile_size`).
     fn tile(&self) -> f32 {
@@ -1752,6 +1775,8 @@ impl Screen for BattleScreen {
                 if self.state.outcome.is_none() {
                     self.play_phase_music(ctx, self.scene.hud.phase);
                 }
+                // The settings may have changed the art.
+                self.follow_art_setting(ctx.settings.art);
             }
         }
     }
@@ -2064,6 +2089,37 @@ mod tests {
     fn screen(fresh: bool) -> BattleScreen {
         let (pack, state) = testutil::sishui();
         BattleScreen::new(pack, state, fresh, Vec2::new(480.0, 270.0))
+    }
+
+    /// The map picture is baked into the renderer: a changed "그림" setting (D27) reloads it,
+    /// an unchanged one or a map without a picture keeps the renderer.
+    #[test]
+    fn a_changed_art_setting_reloads_the_map_picture() {
+        use crate::settings::ArtStyle;
+        // The prologue battle on a map with a picture layer, as the original mode's are.
+        let (pack, state) = testutil::sishui();
+        let mut pack = (*pack).clone();
+        pack.battles
+            .get_mut(&state.battle_id)
+            .expect("battle")
+            .map
+            .image = Some("hexz_00".into());
+        let mut s = BattleScreen::new(Rc::new(pack), state, true, Vec2::new(480.0, 270.0));
+        let picture = Some("maps/hexz_00".to_string());
+        s.meta.picture = None;
+        // No picture used yet: nothing to reload.
+        s.follow_art_setting(ArtStyle::Remake);
+        assert_eq!(s.meta.picture, None);
+        // Loaded with the original's art, the setting unchanged: kept.
+        s.picture_art = Some(ArtStyle::Original);
+        s.follow_art_setting(ArtStyle::Original);
+        assert_eq!(s.meta.picture, None);
+        assert_eq!(s.picture_art, Some(ArtStyle::Original));
+        // Changed: the picture is requested again and the renderer starts over.
+        s.follow_art_setting(ArtStyle::Remake);
+        assert_eq!(s.meta.picture, picture);
+        assert_eq!(s.picture_art, None);
+        assert!(!s.map.is_built());
     }
 
     fn scene_record() -> SceneResume {
