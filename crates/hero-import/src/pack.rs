@@ -2292,6 +2292,59 @@ fn converted_choice(
 /// Most scenario flags a chapter battle's route variants are made for (2^n readings).
 const MAX_ROUTE_FLAGS: usize = 3;
 
+/// The jobs of the chapters' battles, a route variant ([`route_variants`]) a job of its own,
+/// added to `jobs` in campaign order.
+///
+/// Input: the chapters (unreached parts left out), their army plan for the flags the story
+/// fixes, [`chapters::ScriptFlags::settable`], and the scene loader.
+/// Output: per battle with variants, how the campaign picks one.
+/// Why a scene that cannot be read still gets a job: the battle's own conversion then reports
+/// the error where the other battles' are.
+fn chapter_jobs<T>(
+    chapter: &chapters::Chapters,
+    plan: &chapters::ArmyPlan,
+    settable: &BTreeSet<u8>,
+    load: &dyn Fn(usize, usize) -> Result<(crate::scenario::Scene, T), String>,
+    jobs: &mut Vec<BattleJob<'_>>,
+    notes: &mut Vec<String>,
+) -> BTreeMap<String, chapters::BattleChoice> {
+    let mut choices = BTreeMap::new();
+    for (file, scene, part, outro) in &chapter.parts {
+        let chapters::Part::Battle { block, map, leg } = *part else {
+            continue;
+        };
+        let id = chapter_leg_id(*file, *scene, block, leg);
+        let part = plan.part((*file, *scene, block, leg));
+        let known = |f: u8| part.and_then(|p| plan.known_flag(f, p));
+        let (variants, choice) = match load(*file, *scene) {
+            Ok((s, _)) => route_variants(&s, &id, map, (block, leg), settable, &known, notes),
+            Err(_) => (vec![(id.clone(), Vec::new())], None),
+        };
+        for (variant, flags) in variants {
+            jobs.push(BattleJob {
+                id: variant,
+                named: id.clone(),
+                pairing: battles::Pairing {
+                    battle: "",
+                    file: *file,
+                    scene: *scene,
+                    map,
+                    flags: &[],
+                    roles: &[],
+                },
+                base: None,
+                outro: outro.as_ref().map(|(id, s)| (id.clone(), s.gold)),
+                block: Some((block, leg)),
+                flags,
+            });
+        }
+        if let Some(choice) = choice {
+            choices.insert(id, choice);
+        }
+    }
+    choices
+}
+
 /// The route variants of chapter battle `id` (block `block`, leg `leg` of `scene`, on battle map
 /// `map`): each variant's id and the scenario flags its setup and rosters are read with, and
 /// when there is more than one, how the campaign picks one.
@@ -2417,15 +2470,6 @@ fn route_variants(
     )
 }
 
-/// A part of one of the original's chapters: its file, scene and part, and for a story its scene
-/// id and converted scene.
-type ChapterPart = (
-    usize,
-    usize,
-    chapters::Part,
-    Option<(String, chapters::StoryScene)>,
-);
-
 /// Battle id of the original battle of `file`, `scene` and `block` of the original's chapters.
 pub fn chapter_battle_id(file: usize, scene: usize, block: usize) -> String {
     format!("c{file}_s{scene}_b{block}")
@@ -2437,14 +2481,6 @@ pub fn chapter_leg_id(file: usize, scene: usize, block: usize, leg: u8) -> Strin
     match leg {
         0 => chapter_battle_id(file, scene, block),
         n => format!("{}_{}", chapter_battle_id(file, scene, block), n + 1),
-    }
-}
-
-/// Where part `part` of scene `scene` of file `file` is in the scenario.
-fn part_place(file: usize, scene: usize, part: &chapters::Part) -> chapters::Place {
-    match *part {
-        chapters::Part::Story { block } => (file, scene, block, 0),
-        chapters::Part::Battle { block, leg, .. } => (file, scene, block, leg),
     }
 }
 
@@ -2597,66 +2633,46 @@ fn convert_battles(
         )
     };
 
-    // The original's chapters: their parts in order, and the story scenes (read first: the
-    // officers who join in them may be named by the battles' events).
+    // The original's chapters: what their scripts set (read first: the story scenes test those
+    // flags, and the officers who join in them may be named by the battles' events), then their
+    // parts in order with their scenes.
     let continues = options.campaign.is_some();
-    // The original's flags some script of the chapters sets (the others are always clear).
-    let mut settable = BTreeSet::new();
-    // Every flag the chapters' scripts set or test, and the battles that go on in another block:
-    // the flag those set ([`battles::CONTINUATION_FLAG`]) must be one of the original's unused,
-    // and one battle's only.
-    let mut flags_used = BTreeSet::new();
-    let mut continued: Vec<String> = Vec::new();
-    for &file in CHAPTER_FILES.iter().filter(|_| continues) {
-        let Some(count) = scenarios[&file]
-            .as_deref()
-            .and_then(|bytes| ls11::Archive::parse(bytes).ok())
-            .map(|a| a.len())
-        else {
-            continue;
-        };
-        for scene_index in 0..count {
-            if let Ok((scene, _)) = load(file, scene_index) {
-                settable.extend(
-                    scene
-                        .instructions()
-                        .filter(|c| c.mnemonic == "set_flag")
-                        .filter_map(|c| c.operands.get("flag"))
-                        .map(|f| f as u8),
-                );
-                flags_used.extend(battles::flags_used(&scene));
-                // Officers the chapters bring into the army at some point: the others a
-                // battle's setup assigns are enemies.
-                for person in joining(&scene) {
-                    if let Some(id) = names.officers.get(&person) {
-                        names.player_officers.insert(id.clone());
-                    }
-                }
-            }
-        }
-    }
-    // The parts in the order the campaign plays them.
-    let mut chapter: Vec<ChapterPart> = Vec::new();
-    // The scenes of the chapters' battles the original goes on after losing, by part.
-    let mut defeats: BTreeMap<chapters::Place, (String, chapters::StoryScene)> = BTreeMap::new();
-    // The army's changes the setups of the chapters' battles make, by part.
-    let mut befores: BTreeMap<chapters::Place, (String, chapters::StoryScene)> = BTreeMap::new();
-    let song_key = |song: u16| {
-        MUSIC_KEYS
-            .iter()
-            .find(|(_, file, index)| *file == "MUSIC.R3" && *index == usize::from(song))
-            .map(|(key, _, _)| *key)
-    };
-    for &file in CHAPTER_FILES.iter().filter(|_| continues) {
-        let count = scenarios[&file]
+    // The number of scenes of a chapter's file.
+    let scene_count = |file: usize| {
+        scenarios[&file]
             .as_deref()
             .ok_or_else(|| format!("SNR{file}D.R3 missing"))
             .and_then(|bytes| {
                 ls11::Archive::parse(bytes)
                     .map(|a| a.len())
                     .map_err(|e| format!("SNR{file}D.R3: {e}"))
-            });
-        let count = match count {
+            })
+    };
+    let mut script = chapters::ScriptFlags::default();
+    for &file in CHAPTER_FILES.iter().filter(|_| continues) {
+        for scene_index in 0..scene_count(file).unwrap_or(0) {
+            // (A scene that cannot be read is reported by the pass that converts it.)
+            if let Ok((scene, _)) = load(file, scene_index) {
+                script.add(&scene);
+            }
+        }
+    }
+    // Officers the chapters bring into the army at some point: the others a battle's setup
+    // assigns are enemies.
+    for person in &script.joining {
+        if let Some(id) = names.officers.get(person) {
+            names.player_officers.insert(id.clone());
+        }
+    }
+    let song_key = |song: u16| {
+        MUSIC_KEYS
+            .iter()
+            .find(|(_, file, index)| *file == "MUSIC.R3" && *index == usize::from(song))
+            .map(|(key, _, _)| *key)
+    };
+    let mut chapter = chapters::Chapters::default();
+    for &file in CHAPTER_FILES.iter().filter(|_| continues) {
+        let count = match scene_count(file) {
             Ok(n) => n,
             Err(e) => {
                 report.errors.push(format!("chapter {file}: {e}"));
@@ -2671,179 +2687,41 @@ fn convert_battles(
                     continue;
                 }
             };
-            // Whom one meets in each block (the first person to talk to): the places one walks
-            // to are named after them.
-            let places: Vec<Option<String>> = scene
-                .blocks
-                .iter()
-                .map(|b| {
-                    b.records
-                        .iter()
-                        .find(|r| r.trigger.kind == crate::scenario::TALK)
-                        .and_then(|r| names.person_names.get(&r.trigger.word(0)).cloned())
-                })
-                .collect();
-            for part in chapters::parts(&scene) {
-                let (block, leg) = match part {
-                    chapters::Part::Story { block } => (block, 0),
-                    chapters::Part::Battle { block, leg, .. } => (block, leg),
-                };
-                // The flag a route choice of the block sets for the campaign to branch on.
-                let route_flag = format!("orig_route_c{file}_s{scene_index}_b{block}");
-                let ctx = chapters::StoryContext {
-                    names: &names,
-                    text: text.as_ref(),
-                    song_key: &song_key,
-                    block,
-                    route_flag: &route_flag,
-                    places: &places,
-                    settable: &settable,
-                    pictures: event_pictures,
-                };
-                let story = match part {
-                    chapters::Part::Story { block } => Some((
-                        format!("c{file}_s{scene_index}_story{block}"),
-                        chapters::story_scene(&scene.blocks[block], &ctx),
-                    )),
-                    // What the original plays after the battle is won: its outro.
-                    chapters::Part::Battle { .. } => {
-                        let battle = chapter_leg_id(file, scene_index, block, leg);
-                        let goes_on = leg == 0 && battles::has_continuation(&scene, block);
-                        let outro = chapters::victory_scene_after(
-                            &battles::battle_leg(&scene, block, leg),
-                            &ctx,
-                            goes_on.then(|| battles::continuation_flag(&scene)),
-                            Some(&battles::ended_flag(&battle)),
-                        );
-                        (!outro.text.is_empty()).then(|| (format!("{battle}_outro"), outro))
-                    }
-                };
-                if let chapters::Part::Battle { .. } = part {
-                    let fought = battles::battle_leg(&scene, block, leg);
-                    let battle = chapter_leg_id(file, scene_index, block, leg);
-                    if leg == 0 && battles::has_continuation(&scene, block) {
-                        continued.push(battle.clone());
-                    }
-                    let at = (file, scene_index, block, leg);
-                    if let Some(d) = chapters::defeat_scene(&fought, &ctx) {
-                        defeats.insert(at, (format!("{battle}_defeat"), d));
-                    }
-                    let before = chapters::before_scene(&fought, &ctx);
-                    if !before.text.is_empty() {
-                        befores.insert(at, (format!("{battle}_before"), before));
-                    }
-                }
-                chapter.push((file, scene_index, part, story));
-            }
+            let src = chapters::PartSources {
+                names: &names,
+                song_key: &song_key,
+                settable: &script.settable,
+                pictures: event_pictures,
+            };
+            chapter.add_scene(file, scene_index, &scene, text.as_ref(), &src);
         }
     }
-    if flags_used.contains(&battles::CONTINUATION_FLAG) || continued.len() > 1 {
+    // The flag the battles that go on in another block set ([`battles::CONTINUATION_FLAG`])
+    // must be one of the original's unused, and one battle's only.
+    if script.used.contains(&battles::CONTINUATION_FLAG) || chapter.continued.len() > 1 {
         report.errors.push(format!(
             "the battles that go on in another block ({}) need scenario flag {} of their own, \
              which the original's scripts must not use: the conversion has no such flag for them",
-            continued.join(", "),
+            chapter.continued.join(", "),
             battles::CONTINUATION_FLAG
         ));
     }
-    // Only the parts the story reaches: an alternative the conversion offers no choice for
-    // (the original lets one pick it by whom one talks to) is left out.
-    // The chapter's steps and how each goes on: after its story or won battle, and after its
-    // lost battle when it has a scene for that.
-    let steps = |chapter: &[ChapterPart]| -> (Vec<chapters::Place>, Vec<Vec<chapters::Next>>) {
-        let at: Vec<chapters::Place> = chapter
-            .iter()
-            .map(|(file, scene, part, _)| part_place(*file, *scene, part))
-            .collect();
-        let next = chapter
-            .iter()
-            .zip(&at)
-            .map(|((_, _, _, s), place)| {
-                let mut next = vec![s.as_ref().map(|(_, s)| s.next.clone()).unwrap_or_default()];
-                if let Some((_, d)) = defeats.get(place) {
-                    next.push(chapters::after_defeat(*place, &d.next));
-                }
-                next
-            })
-            .collect();
-        (at, next)
-    };
-    let (at, next) = steps(&chapter);
-    let reached = chapters::reachable(&at, &next);
-    let mut reached = reached.into_iter();
-    chapter.retain(|(file, scene, part, _)| {
-        let kept = reached.next().unwrap_or(true);
-        if !kept {
-            let (_, _, block, _) = part_place(*file, *scene, part);
-            report.notes.push(format!(
-                "SNR{file} scene {scene} block {block}: an alternative the converted story does \
-                 not reach (the original offers it by whom one talks to); left out"
-            ));
-        }
-        kept
-    });
-    // Who is in the army at each chapter battle, over the ways the story reaches it
-    // ([`chapters::army_at_steps`]): how each kept part goes on, and how its scenes move officers
-    // (the last `@join`/`@away` of the scene before its battle, of its story or outro, of its
-    // lost battle's scene).
-    let (at, next) = steps(&chapter);
-    let part_of: BTreeMap<chapters::Place, usize> = chapter
-        .iter()
-        .zip(&at)
-        .enumerate()
-        .filter(|(_, ((_, _, part, _), _))| matches!(part, chapters::Part::Battle { .. }))
-        .map(|(i, (_, place))| (*place, i))
-        .collect();
-    let step_scenes: Vec<[Option<&chapters::StoryScene>; 3]> = chapter
-        .iter()
-        .zip(&at)
-        .map(|((_, _, _, story), place)| {
-            [
-                befores.get(place).map(|(_, s)| s),
-                story.as_ref().map(|(_, s)| s),
-                defeats.get(place).map(|(_, s)| s),
-            ]
-        })
-        .collect();
-    let step_moves = chapters::army_moves(&step_scenes);
-    let starting: BTreeSet<&str> = options
+    report.notes.extend(chapter.keep_reached());
+    let starting: BTreeSet<String> = options
         .campaign
         .iter()
-        .flat_map(|c| &c.starting_officers)
-        .map(|s| s.as_str())
+        .flat_map(|c| c.starting_officers.iter().cloned())
         .collect();
-    let army: BTreeMap<&str, Vec<u8>> = step_moves
-        .iter()
-        .map(|(id, m)| {
-            let start = chapters::starts_in_army(starting.contains(id.as_str()), m);
-            (id.as_str(), chapters::army_at_steps(&at, &next, start, m))
-        })
-        .collect();
-    // An officer the story never moves is in the army when they start in it or join it some
-    // other way (a battle's `set_country`); one who never joins is not (Sishui's guests,
-    // Gongsun Zan and Tao Qian, fight beside the army). (Every kept part is reached: dropping
-    // the others changes no way between the rest.)
-    let joiners = names.player_officers.clone();
-    let army_at = |id: &str, part: Option<usize>| match (army.get(id), part) {
-        (Some(a), Some(i)) => {
-            debug_assert!(a[i] != 0, "{id} at an unreached part {i}");
-            a[i]
-        }
-        _ if starting.contains(id) || joiners.contains(id) => chapters::ARMY_IN,
-        _ => chapters::ARMY_OUT,
-    };
-    let joining_scenes = chapter
-        .iter()
-        .filter_map(|(_, _, _, story)| story.as_ref().map(|(_, s)| s))
-        .chain(befores.values().map(|(_, s)| s))
-        .chain(defeats.values().map(|(_, s)| s));
-    for line in joining_scenes.flat_map(|s| s.text.lines()) {
-        if let Some(id) = line.strip_prefix("@join ") {
-            names.player_officers.insert(id.to_string());
-        }
-    }
+    let plan = chapters::ArmyPlan::new(
+        &chapter,
+        starting,
+        names.player_officers.clone(),
+        &script.battle_set,
+    );
+    let joined: Vec<String> = chapter.joined().map(str::to_string).collect();
+    names.player_officers.extend(joined);
 
     // The battles: the base pack's that follow original ones, then the chapters' battles.
-    // (battle id, pairing, the base battle, the outro of a chapter's battle and its reward gold)
     let mut jobs: Vec<BattleJob<'_>> = wanted
         .iter()
         .map(|p| BattleJob {
@@ -2856,98 +2734,15 @@ fn convert_battles(
             flags: p.flags.to_vec(),
         })
         .collect();
-    // A flag's value at the battle of chapter part `part`, when the story fixes it: a flag no
-    // battle sets that the story's scenes set only outright (no `@if`, `@choice`, `@goto`,
-    // `@label` or `@end` before the `@set` in its scene) has the value every way to the battle
-    // gives it ([`chapters::army_at_steps`], clear at the start).
-    let mut battle_set: BTreeSet<u8> = BTreeSet::new();
-    for &file in CHAPTER_FILES.iter().filter(|_| continues) {
-        let count = scenarios[&file]
-            .as_deref()
-            .and_then(|bytes| ls11::Archive::parse(bytes).ok())
-            .map_or(0, |a| a.len());
-        for scene_index in 0..count {
-            if let Ok((scene, _)) = load(file, scene_index) {
-                battle_set.extend(battles::battle_set_flags(&scene));
-            }
-        }
-    }
-    let known_flag = |f: u8, part: usize| -> Option<bool> {
-        if battle_set.contains(&f) {
-            return None;
-        }
-        let set = format!("@set {} = ", chapters::flag(f));
-        let mut moves = vec![chapters::StepMoves::default(); step_scenes.len()];
-        for (i, scenes) in step_scenes.iter().enumerate() {
-            for (k, s) in scenes.iter().enumerate() {
-                let mut branched = false;
-                for line in s.iter().flat_map(|s| s.text.lines()) {
-                    let control = ["@if ", "@choice", "@goto ", "@label ", "@end"];
-                    branched |= control.iter().any(|c| line.starts_with(c));
-                    let Some(value) = line.strip_prefix(&set) else {
-                        continue;
-                    };
-                    if branched {
-                        return None;
-                    }
-                    let at = match k {
-                        0 => &mut moves[i].before,
-                        1 => &mut moves[i].after,
-                        _ => &mut moves[i].after_defeat,
-                    };
-                    *at = Some(value.trim() != "0");
-                }
-            }
-        }
-        match chapters::army_at_steps(&at, &next, false, &moves)[part] {
-            chapters::ARMY_IN => Some(true),
-            chapters::ARMY_OUT => Some(false),
-            _ => None,
-        }
-    };
     // The route variants of the chapters' battles: how the campaign picks one, per battle.
-    let mut choices: BTreeMap<String, chapters::BattleChoice> = BTreeMap::new();
-    for (file, scene, part, outro) in &chapter {
-        if let chapters::Part::Battle { block, map, leg } = *part {
-            let id = chapter_leg_id(*file, *scene, block, leg);
-            let part = part_of.get(&(*file, *scene, block, leg)).copied();
-            let known = |f: u8| part.and_then(|p| known_flag(f, p));
-            let (variants, choice) = match load(*file, *scene) {
-                Ok((s, _)) => route_variants(
-                    &s,
-                    &id,
-                    map,
-                    (block, leg),
-                    &settable,
-                    &known,
-                    &mut report.notes,
-                ),
-                // (The battle's own conversion reports it.)
-                Err(_) => (vec![(id.clone(), Vec::new())], None),
-            };
-            for (variant, flags) in variants {
-                jobs.push(BattleJob {
-                    id: variant,
-                    named: id.clone(),
-                    pairing: battles::Pairing {
-                        battle: "",
-                        file: *file,
-                        scene: *scene,
-                        map,
-                        flags: &[],
-                        roles: &[],
-                    },
-                    base: None,
-                    outro: outro.as_ref().map(|(id, s)| (id.clone(), s.gold)),
-                    block: Some((block, leg)),
-                    flags,
-                });
-            }
-            if let Some(choice) = choice {
-                choices.insert(id, choice);
-            }
-        }
-    }
+    let choices = chapter_jobs(
+        &chapter,
+        &plan,
+        &script.settable,
+        &load,
+        &mut jobs,
+        &mut report.notes,
+    );
     // Per chapter battle, the lines its outro starts with (officers joining or leaving).
     let mut army_scenes: BTreeMap<String, String> = BTreeMap::new();
     // The battles whose events set [`battles::ended_flag`].
@@ -3094,8 +2889,8 @@ fn convert_battles(
                     // when they are in it and not away, else the officer as `officers.toml`
                     // has them.
                     let lord = names.officers.get(&battles::LIU_BEI);
-                    let part = block.and_then(|(b, leg)| part_of.get(&(file, scene_index, b, leg)));
-                    let army = |id: &String| army_at(id, part.copied());
+                    let part = block.and_then(|(b, leg)| plan.part((file, scene_index, b, leg)));
+                    let army = |id: &String| plan.army_at(id, part);
                     for u in original
                         .player
                         .iter()
@@ -3243,9 +3038,7 @@ fn convert_battles(
             // arrives as the army's officer, on the player's side, with their progress; one not
             // in the army arrives as an ally.
             if pairing.battle.is_empty() {
-                let part = block
-                    .and_then(|(b, leg)| part_of.get(&(file, scene_index, b, leg)))
-                    .copied();
+                let part = block.and_then(|(b, leg)| plan.part((file, scene_index, b, leg)));
                 // (A setup's arrival names only its officer; a friendly roster's ally carries its
                 // own class and stays an ally. One who may be in the army, by the route, arrives
                 // on the player's side too: the battle places the army's officer when they are.)
@@ -3256,7 +3049,7 @@ fn convert_battles(
                 }) {
                     if u.officer
                         .as_deref()
-                        .is_some_and(|o| army_at(o, part) != chapters::ARMY_OUT)
+                        .is_some_and(|o| plan.army_at(o, part) != chapters::ARMY_OUT)
                     {
                         u.side = hero_core::battledef::Side::Player;
                     }
@@ -3489,15 +3282,6 @@ fn convert_battles(
     }
 
     // The chapters' story and campaign.
-    let mut steps = Vec::new();
-    let mut story = String::from(
-        "# The story of the original's chapters, converted from the scenario of the player's own\n\
-         # copy by `hero-tools original pack` (do not edit; run the importer again). Scene\n\
-         # `c<file>_s<scene>_story<block>` is block <block> of the scene (docs/ORIGINAL_DATA.md).\n",
-    );
-    // What the camps sell: the original's shop stays until a block sets another (the prologue
-    // sets the first before its first battle).
-    let mut shop: Vec<String> = Vec::new();
     // The camp title of a chapter's battle (leg `leg`), when it was converted.
     let battle_title = |id: &str, leg: u8| {
         records.iter().find(|r| r.id == id).map(|r| {
@@ -3513,95 +3297,14 @@ fn convert_battles(
             }
         })
     };
-    for (file, scene, part, converted_story) in &chapter {
-        match (part, converted_story) {
-            (chapters::Part::Battle { block, leg, .. }, outro) => {
-                let id = chapter_leg_id(*file, *scene, *block, *leg);
-                let Some(title) = battle_title(&id, *leg) else {
-                    report.notes.push(format!(
-                        "{id}: not converted; the campaign goes on without it"
-                    ));
-                    continue;
-                };
-                let mut next = chapters::Next::Default;
-                // Its outro (played by the battle) and what it sets up for the next camp; the
-                // officers the battle moved in or out of the army come first.
-                let army = army_scenes.get(&id).map_or("", String::as_str);
-                if let Some((outro_id, s)) = outro {
-                    // (Its victory script is gated on the flag only where an event sets it.)
-                    let text = if ended.contains(&id) {
-                        s.text.clone()
-                    } else {
-                        chapters::without_ended_gate(&s.text, &battles::ended_flag(&id))
-                    };
-                    let _ = write!(story, "\n== {outro_id}\n{army}{text}");
-                    for note in &s.notes {
-                        report.notes.push(format!("{outro_id}: {note}"));
-                    }
-                    next = s.next.clone();
-                } else if !army.is_empty() {
-                    let _ = write!(story, "\n== {id}_outro\n{army}");
-                }
-                steps.push(chapters::Step {
-                    at: (*file, *scene, *block, *leg),
-                    kind: chapters::StepKind::Battle {
-                        choice: choices
-                            .get(&id)
-                            .and_then(|c| converted_choice(c, &id, &records)),
-                        battle: id,
-                        title,
-                        shop: shop.clone(),
-                        before: befores.get(&(*file, *scene, *block, *leg)).map(|(id, b)| {
-                            let _ = write!(story, "\n== {id}\n{}", b.text);
-                            for note in &b.notes {
-                                report.notes.push(format!("{id}: {note}"));
-                            }
-                            id.clone()
-                        }),
-                        defeat: defeats.get(&(*file, *scene, *block, *leg)).map(|(id, d)| {
-                            let _ = write!(story, "\n== {id}\n{}", d.text);
-                            for note in &d.notes {
-                                report.notes.push(format!("{id}: {note}"));
-                            }
-                            chapters::Defeat {
-                                scene: id.clone(),
-                                next: d.next.clone(),
-                                ends: chapters::Ends::of(d),
-                            }
-                        }),
-                    },
-                    next,
-                    ends: outro
-                        .as_ref()
-                        .map(|(_, s)| chapters::Ends::of(s))
-                        .unwrap_or_default(),
-                });
-                if let Some((_, s)) = outro.as_ref().filter(|(_, s)| !s.shop.is_empty()) {
-                    shop = s.shop.clone();
-                }
-            }
-            (chapters::Part::Story { block }, Some((id, s))) => {
-                if !s.shop.is_empty() {
-                    shop = s.shop.clone();
-                }
-                for note in &s.notes {
-                    report.notes.push(format!("{id}: {note}"));
-                }
-                // A block with nothing to show and nowhere else to go is left out.
-                if s.text.trim().is_empty() && s.next == chapters::Next::Default {
-                    continue;
-                }
-                let _ = write!(story, "\n== {id}\n{}", s.text);
-                steps.push(chapters::Step {
-                    at: (*file, *scene, *block, 0),
-                    kind: chapters::StepKind::Story { scene: id.clone() },
-                    ends: chapters::Ends::of(s),
-                    next: s.next.clone(),
-                });
-            }
-            (chapters::Part::Story { .. }, None) => {}
-        }
-    }
+    let choice = |id: &str| {
+        choices
+            .get(id)
+            .and_then(|c| converted_choice(c, id, &records))
+    };
+    let (steps, story, notes) =
+        chapter.campaign_steps(&battle_title, &choice, &army_scenes, &ended);
+    report.notes.extend(notes);
     let mut wrote_campaign = false;
     if let Some(campaign) = options.campaign.as_ref().filter(|_| !steps.is_empty()) {
         let last = CHAPTER_FILES[CHAPTER_FILES.len() - 1];
@@ -4136,21 +3839,8 @@ fn shared_scene<'a>(
     battles::scene_ids(drama).find_map(|s| owners.get(s).map(|o| (s, o.as_str())))
 }
 
-/// The persons scene `scene` brings into Liu Bei's army: `set_country` to country 0 and
-/// `set_allegiance` to army 0.
-fn joining(scene: &crate::scenario::Scene) -> Vec<u16> {
-    scene
-        .instructions()
-        .filter_map(|c| match c.mnemonic {
-            "set_allegiance" if c.operands.get("army") == Some(0) => c.operands.get("person"),
-            "set_country" if c.operands.get("country") == Some(0) => c.operands.get("person"),
-            _ => None,
-        })
-        .collect()
-}
-
 /// The persons the scenes of the scenario files `files` (`SNRnD.R3`) bring into Liu Bei's army
-/// ([`joining`]); a file or scene that cannot be read is an error of `report`.
+/// ([`chapters::joining`]); a file or scene that cannot be read is an error of `report`.
 fn joining_persons(
     install: &InstallDir,
     files: &[usize],
@@ -4176,7 +3866,7 @@ fn joining_persons(
                 .map_err(|e| e.to_string())
                 .and_then(|data| crate::scenario::parse_scene(&data).map_err(|e| e.to_string()));
             match scene {
-                Ok(scene) => persons.extend(joining(&scene)),
+                Ok(scene) => persons.extend(chapters::joining(&scene)),
                 Err(e) => report
                     .errors
                     .push(format!("{name} scene {scene_index}: {e}")),

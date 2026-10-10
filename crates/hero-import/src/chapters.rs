@@ -1746,6 +1746,499 @@ pub fn chapter_nodes(steps: &[Step], ending: (&str, &str)) -> (Vec<Node>, String
     (nodes, first)
 }
 
+// ----- assembling the chapters ---------------------------------------------------------------
+//
+// What `pack::convert_battles` does with the chapters' scenes before and after converting their
+// battles: what their scripts set (read first: the story scenes need it), the parts in campaign
+// order with their scenes, who is in the army at each battle, and the campaign's steps.
+
+/// A part of one of the original's chapters: its file, scene and part, and for a story its scene
+/// id and converted scene (for a battle its outro's).
+pub type ChapterPart = (usize, usize, Part, Option<(String, StoryScene)>);
+
+/// Where part `part` of scene `scene` of file `file` is in the scenario.
+pub fn part_place(file: usize, scene: usize, part: &Part) -> Place {
+    match *part {
+        Part::Story { block } => (file, scene, block, 0),
+        Part::Battle { block, leg, .. } => (file, scene, block, leg),
+    }
+}
+
+/// The persons scene `scene` brings into Liu Bei's army: `set_country` to country 0 and
+/// `set_allegiance` to army 0.
+pub fn joining(scene: &Scene) -> Vec<u16> {
+    scene
+        .instructions()
+        .filter_map(|c| match c.mnemonic {
+            "set_allegiance" if c.operands.get("army") == Some(0) => c.operands.get("person"),
+            "set_country" if c.operands.get("country") == Some(0) => c.operands.get("person"),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What the scripts of every scene of the chapters do with the original's flags and army, read
+/// before any part is converted: a story scene decides tests of flags no script sets now, and a
+/// battle's setup assigns the officers who never join to the enemy.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScriptFlags {
+    /// The flags some script sets (`set_flag`): the others are always clear.
+    pub settable: BTreeSet<u8>,
+    /// Every flag a script sets or tests ([`battles::flags_used`]).
+    pub used: BTreeSet<u8>,
+    /// The flags a battle's events set ([`battles::battle_set_flags`]): the story does not fix
+    /// their value at a later battle.
+    pub battle_set: BTreeSet<u8>,
+    /// The persons some scene brings into the army ([`joining`]).
+    pub joining: BTreeSet<u16>,
+}
+
+impl ScriptFlags {
+    /// Adds what `scene`'s scripts do.
+    ///
+    /// Input: one scene of the chapters (every scene goes through here once, in any order).
+    /// Output: the sets grow; nothing depends on the order of the scenes.
+    /// Why one pass for all four: each needs the whole scenario before the first part is
+    /// converted, and decoding a scene is the costly part.
+    pub fn add(&mut self, scene: &Scene) {
+        self.settable.extend(
+            scene
+                .instructions()
+                .filter(|c| c.mnemonic == "set_flag")
+                .filter_map(|c| c.operands.get("flag"))
+                .map(|f| f as u8),
+        );
+        self.used.extend(battles::flags_used(scene));
+        self.battle_set.extend(battles::battle_set_flags(scene));
+        self.joining.extend(joining(scene));
+    }
+}
+
+/// What the parts of a scene are converted with besides the scene and its text.
+pub struct PartSources<'a> {
+    pub names: &'a Names,
+    /// Music key of an original song number, if the pack has one for it.
+    pub song_key: &'a dyn Fn(u16) -> Option<&'static str>,
+    /// [`ScriptFlags::settable`].
+    pub settable: &'a BTreeSet<u8>,
+    /// The event pictures the pack has ([`StoryContext::pictures`]).
+    pub pictures: &'a BTreeSet<u8>,
+}
+
+/// The original's chapters as parts in the order the campaign plays them, with their scenes.
+#[derive(Default)]
+pub struct Chapters {
+    pub parts: Vec<ChapterPart>,
+    /// The scenes of the battles the original goes on after losing, by part.
+    pub defeats: BTreeMap<Place, (String, StoryScene)>,
+    /// The army's changes the setups of the battles make, by part.
+    pub befores: BTreeMap<Place, (String, StoryScene)>,
+    /// The battles that go on in another block ([`battles::has_continuation`]).
+    pub continued: Vec<String>,
+}
+
+impl Chapters {
+    /// Adds the parts of scene `scene_index` of `SNR<file>D.R3`: a story block's scene, a
+    /// battle's outro, and a battle's scenes for losing it and for its setup.
+    ///
+    /// Input: the decoded scene and its text; scenes are added in campaign order.
+    /// Output: [`Chapters::parts`] and the scene maps grow.
+    /// Why the outro is built here and the battle later: the outro belongs to the campaign's
+    /// step (its `next` decides where the story goes), the battle to its own file.
+    pub fn add_scene(
+        &mut self,
+        file: usize,
+        scene_index: usize,
+        scene: &Scene,
+        text: &dyn TextSource,
+        src: &PartSources,
+    ) {
+        // Whom one meets in each block (the first person to talk to): the places one walks to
+        // are named after them.
+        let places: Vec<Option<String>> = scene
+            .blocks
+            .iter()
+            .map(|b| {
+                b.records
+                    .iter()
+                    .find(|r| r.trigger.kind == crate::scenario::TALK)
+                    .and_then(|r| src.names.person_names.get(&r.trigger.word(0)).cloned())
+            })
+            .collect();
+        for part in parts(scene) {
+            let (block, leg) = match part {
+                Part::Story { block } => (block, 0),
+                Part::Battle { block, leg, .. } => (block, leg),
+            };
+            // The flag a route choice of the block sets for the campaign to branch on.
+            let route_flag = format!("orig_route_c{file}_s{scene_index}_b{block}");
+            let ctx = StoryContext {
+                names: src.names,
+                text,
+                song_key: src.song_key,
+                block,
+                route_flag: &route_flag,
+                places: &places,
+                settable: src.settable,
+                pictures: src.pictures,
+            };
+            let story = match part {
+                Part::Story { block } => Some((
+                    format!("c{file}_s{scene_index}_story{block}"),
+                    story_scene(&scene.blocks[block], &ctx),
+                )),
+                // What the original plays after the battle is won: its outro.
+                Part::Battle { .. } => {
+                    let battle = crate::pack::chapter_leg_id(file, scene_index, block, leg);
+                    let goes_on = leg == 0 && battles::has_continuation(scene, block);
+                    let outro = victory_scene_after(
+                        &battles::battle_leg(scene, block, leg),
+                        &ctx,
+                        goes_on.then(|| battles::continuation_flag(scene)),
+                        Some(&battles::ended_flag(&battle)),
+                    );
+                    (!outro.text.is_empty()).then(|| (format!("{battle}_outro"), outro))
+                }
+            };
+            if let Part::Battle { .. } = part {
+                let fought = battles::battle_leg(scene, block, leg);
+                let battle = crate::pack::chapter_leg_id(file, scene_index, block, leg);
+                if leg == 0 && battles::has_continuation(scene, block) {
+                    self.continued.push(battle.clone());
+                }
+                let at = (file, scene_index, block, leg);
+                if let Some(d) = defeat_scene(&fought, &ctx) {
+                    self.defeats.insert(at, (format!("{battle}_defeat"), d));
+                }
+                let before = before_scene(&fought, &ctx);
+                if !before.text.is_empty() {
+                    self.befores
+                        .insert(at, (format!("{battle}_before"), before));
+                }
+            }
+            self.parts.push((file, scene_index, part, story));
+        }
+    }
+
+    /// Each part's place and how it goes on: after its story or won battle, and after its lost
+    /// battle when it has a scene for that.
+    pub fn steps(&self) -> (Vec<Place>, Vec<Vec<Next>>) {
+        let at: Vec<Place> = self
+            .parts
+            .iter()
+            .map(|(file, scene, part, _)| part_place(*file, *scene, part))
+            .collect();
+        let next = self
+            .parts
+            .iter()
+            .zip(&at)
+            .map(|((_, _, _, s), place)| {
+                let mut next = vec![s.as_ref().map(|(_, s)| s.next.clone()).unwrap_or_default()];
+                if let Some((_, d)) = self.defeats.get(place) {
+                    next.push(after_defeat(*place, &d.next));
+                }
+                next
+            })
+            .collect();
+        (at, next)
+    }
+
+    /// Leaves out the parts the story does not reach: an alternative the conversion offers no
+    /// choice for (the original lets one pick it by whom one talks to).
+    ///
+    /// Output: a note for each part left out.
+    /// Why before the army is worked out: dropping the unreached parts changes no way between
+    /// the rest, and [`ArmyPlan`] then needs no "unreached" case.
+    pub fn keep_reached(&mut self) -> Vec<String> {
+        let (at, next) = self.steps();
+        let mut reached = reachable(&at, &next).into_iter();
+        let mut notes = Vec::new();
+        self.parts.retain(|(file, scene, part, _)| {
+            let kept = reached.next().unwrap_or(true);
+            if !kept {
+                let (_, _, block, _) = part_place(*file, *scene, part);
+                notes.push(format!(
+                    "SNR{file} scene {scene} block {block}: an alternative the converted story \
+                     does not reach (the original offers it by whom one talks to); left out"
+                ));
+            }
+            kept
+        });
+        notes
+    }
+
+    /// The scenes of each part: the one before its battle, the one it plays when it goes on (a
+    /// story, a won battle's outro) and its lost battle's.
+    fn step_scenes(&self) -> Vec<[Option<&StoryScene>; 3]> {
+        self.parts
+            .iter()
+            .map(|(file, scene, part, story)| {
+                let place = part_place(*file, *scene, part);
+                [
+                    self.befores.get(&place).map(|(_, s)| s),
+                    story.as_ref().map(|(_, s)| s),
+                    self.defeats.get(&place).map(|(_, s)| s),
+                ]
+            })
+            .collect()
+    }
+
+    /// The officers some scene of the chapters brings into the army (`@join`).
+    pub fn joined(&self) -> impl Iterator<Item = &str> {
+        self.parts
+            .iter()
+            .filter_map(|(_, _, _, story)| story.as_ref().map(|(_, s)| s))
+            .chain(self.befores.values().map(|(_, s)| s))
+            .chain(self.defeats.values().map(|(_, s)| s))
+            .flat_map(|s| s.text.lines())
+            .filter_map(|line| line.strip_prefix("@join "))
+    }
+
+    /// The campaign's steps and the story's drama file, from the parts whose battles were
+    /// converted.
+    ///
+    /// Input: `title` gives a converted battle's camp title (`None`: it was not converted),
+    /// `choice` its route variants' choice, `army_scenes` the lines its outro starts with
+    /// (officers the battle moved), `ended` the battles an event ends.
+    /// Output: the steps, the drama file's text, and notes (a battle left out, the scenes'
+    /// own notes) in part order.
+    /// Why the story text is written here: a battle's outro, setup and defeat scenes go in only
+    /// when its step does, so the file never has a scene the campaign does not play.
+    pub fn campaign_steps(
+        &self,
+        title: &dyn Fn(&str, u8) -> Option<String>,
+        choice: &dyn Fn(&str) -> Option<Box<BattleChoice>>,
+        army_scenes: &BTreeMap<String, String>,
+        ended: &BTreeSet<String>,
+    ) -> (Vec<Step>, String, Vec<String>) {
+        let mut steps = Vec::new();
+        let mut notes = Vec::new();
+        let mut story = String::from(
+            "# The story of the original's chapters, converted from the scenario of the player's own\n\
+             # copy by `hero-tools original pack` (do not edit; run the importer again). Scene\n\
+             # `c<file>_s<scene>_story<block>` is block <block> of the scene (docs/ORIGINAL_DATA.md).\n",
+        );
+        // What the camps sell: the original's shop stays until a block sets another (the
+        // prologue sets the first before its first battle).
+        let mut shop: Vec<String> = Vec::new();
+        for (file, scene, part, converted_story) in &self.parts {
+            match (part, converted_story) {
+                (Part::Battle { block, leg, .. }, outro) => {
+                    let id = crate::pack::chapter_leg_id(*file, *scene, *block, *leg);
+                    let Some(title) = title(&id, *leg) else {
+                        notes.push(format!(
+                            "{id}: not converted; the campaign goes on without it"
+                        ));
+                        continue;
+                    };
+                    let mut next = Next::Default;
+                    // Its outro (played by the battle) and what it sets up for the next camp;
+                    // the officers the battle moved in or out of the army come first.
+                    let army = army_scenes.get(&id).map_or("", String::as_str);
+                    if let Some((outro_id, s)) = outro {
+                        // (Its victory script is gated on the flag only where an event sets it.)
+                        let text = if ended.contains(&id) {
+                            s.text.clone()
+                        } else {
+                            without_ended_gate(&s.text, &battles::ended_flag(&id))
+                        };
+                        let _ = write!(story, "\n== {outro_id}\n{army}{text}");
+                        for note in &s.notes {
+                            notes.push(format!("{outro_id}: {note}"));
+                        }
+                        next = s.next.clone();
+                    } else if !army.is_empty() {
+                        let _ = write!(story, "\n== {id}_outro\n{army}");
+                    }
+                    let at = (*file, *scene, *block, *leg);
+                    let before = self.befores.get(&at).map(|(id, b)| {
+                        let _ = write!(story, "\n== {id}\n{}", b.text);
+                        for note in &b.notes {
+                            notes.push(format!("{id}: {note}"));
+                        }
+                        id.clone()
+                    });
+                    let defeat = self.defeats.get(&at).map(|(id, d)| {
+                        let _ = write!(story, "\n== {id}\n{}", d.text);
+                        for note in &d.notes {
+                            notes.push(format!("{id}: {note}"));
+                        }
+                        Defeat {
+                            scene: id.clone(),
+                            next: d.next.clone(),
+                            ends: Ends::of(d),
+                        }
+                    });
+                    steps.push(Step {
+                        at,
+                        kind: StepKind::Battle {
+                            choice: choice(&id),
+                            battle: id,
+                            title,
+                            shop: shop.clone(),
+                            before,
+                            defeat,
+                        },
+                        next,
+                        ends: outro.as_ref().map(|(_, s)| Ends::of(s)).unwrap_or_default(),
+                    });
+                    if let Some((_, s)) = outro.as_ref().filter(|(_, s)| !s.shop.is_empty()) {
+                        shop = s.shop.clone();
+                    }
+                }
+                (Part::Story { block }, Some((id, s))) => {
+                    if !s.shop.is_empty() {
+                        shop = s.shop.clone();
+                    }
+                    for note in &s.notes {
+                        notes.push(format!("{id}: {note}"));
+                    }
+                    // A block with nothing to show and nowhere else to go is left out.
+                    if s.text.trim().is_empty() && s.next == Next::Default {
+                        continue;
+                    }
+                    let _ = write!(story, "\n== {id}\n{}", s.text);
+                    steps.push(Step {
+                        at: (*file, *scene, *block, 0),
+                        kind: StepKind::Story { scene: id.clone() },
+                        ends: Ends::of(s),
+                        next: s.next.clone(),
+                    });
+                }
+                (Part::Story { .. }, None) => {}
+            }
+        }
+        (steps, story, notes)
+    }
+}
+
+/// Who is in the army at each battle of the chapters, and which flags the story fixes there,
+/// over the ways the story reaches it ([`army_at_steps`]).
+pub struct ArmyPlan<'a> {
+    chapters: &'a Chapters,
+    at: Vec<Place>,
+    next: Vec<Vec<Next>>,
+    /// The index of each battle part, by its place.
+    part_of: BTreeMap<Place, usize>,
+    /// Per officer the story moves, [`army_at_steps`].
+    army: BTreeMap<String, Vec<u8>>,
+    /// The officers the pack chain's campaign starts with.
+    starting: BTreeSet<String>,
+    /// The officers who join some other way (a battle's `set_country`).
+    joiners: BTreeSet<String>,
+    /// [`ScriptFlags::battle_set`].
+    battle_set: &'a BTreeSet<u8>,
+}
+
+impl<'a> ArmyPlan<'a> {
+    /// The plan of `chapters` (their unreached parts already left out,
+    /// [`Chapters::keep_reached`]).
+    ///
+    /// Input: the officers the campaign starts with; `joiners`, those some script brings into
+    /// the army ([`ScriptFlags::joining`]); `battle_set`, [`ScriptFlags::battle_set`].
+    /// Why paths and not the chapters' order: the scenes of another route or a lost battle's
+    /// scene do not play before a battle the story reaches without them.
+    pub fn new(
+        chapters: &'a Chapters,
+        starting: BTreeSet<String>,
+        joiners: BTreeSet<String>,
+        battle_set: &'a BTreeSet<u8>,
+    ) -> ArmyPlan<'a> {
+        let (at, next) = chapters.steps();
+        let part_of = chapters
+            .parts
+            .iter()
+            .zip(&at)
+            .enumerate()
+            .filter(|(_, ((_, _, part, _), _))| matches!(part, Part::Battle { .. }))
+            .map(|(i, (_, place))| (*place, i))
+            .collect();
+        // How each part's scenes move officers: the last `@join`/`@away` of the scene before
+        // its battle, of its story or outro, of its lost battle's scene.
+        let army = army_moves(&chapters.step_scenes())
+            .into_iter()
+            .map(|(id, m)| {
+                let start = starts_in_army(starting.contains(&id), &m);
+                let a = army_at_steps(&at, &next, start, &m);
+                (id, a)
+            })
+            .collect();
+        ArmyPlan {
+            chapters,
+            at,
+            next,
+            part_of,
+            army,
+            starting,
+            joiners,
+            battle_set,
+        }
+    }
+
+    /// The index of the battle part at `place`, if the story reaches it.
+    pub fn part(&self, place: Place) -> Option<usize> {
+        self.part_of.get(&place).copied()
+    }
+
+    /// Whether officer `id` can be out of or in the army ([`ARMY_OUT`] | [`ARMY_IN`]) at the
+    /// battle of part `part` (`None`: a battle not of the chapters).
+    ///
+    /// Why the fallback: an officer the story never moves is in the army when they start in
+    /// it or join it some other way (a battle's `set_country`); one who never joins is not
+    /// (Sishui's guests, Gongsun Zan and Tao Qian, fight beside the army).
+    pub fn army_at(&self, id: &str, part: Option<usize>) -> u8 {
+        match (self.army.get(id), part) {
+            (Some(a), Some(i)) => {
+                debug_assert!(a[i] != 0, "{id} at an unreached part {i}");
+                a[i]
+            }
+            _ if self.starting.contains(id) || self.joiners.contains(id) => ARMY_IN,
+            _ => ARMY_OUT,
+        }
+    }
+
+    /// Flag `f`'s value at the battle of part `part`, when the story fixes it.
+    ///
+    /// Why so narrow: a flag no battle sets that the story's scenes set only outright (no
+    /// `@if`, `@choice`, `@goto`, `@label` or `@end` before the `@set` in its scene) has the
+    /// value every way to the battle gives it ([`army_at_steps`], clear at the start); anything
+    /// else may differ by the way taken.
+    pub fn known_flag(&self, f: u8, part: usize) -> Option<bool> {
+        if self.battle_set.contains(&f) {
+            return None;
+        }
+        let set = format!("@set {} = ", flag(f));
+        let step_scenes = self.chapters.step_scenes();
+        let mut moves = vec![StepMoves::default(); step_scenes.len()];
+        for (i, scenes) in step_scenes.iter().enumerate() {
+            for (k, s) in scenes.iter().enumerate() {
+                let mut branched = false;
+                for line in s.iter().flat_map(|s| s.text.lines()) {
+                    let control = ["@if ", "@choice", "@goto ", "@label ", "@end"];
+                    branched |= control.iter().any(|c| line.starts_with(c));
+                    let Some(value) = line.strip_prefix(&set) else {
+                        continue;
+                    };
+                    if branched {
+                        return None;
+                    }
+                    let at = match k {
+                        0 => &mut moves[i].before,
+                        1 => &mut moves[i].after,
+                        _ => &mut moves[i].after_defeat,
+                    };
+                    *at = Some(value.trim() != "0");
+                }
+            }
+        }
+        match army_at_steps(&self.at, &self.next, false, &moves)[part] {
+            ARMY_IN => Some(true),
+            ARMY_OUT => Some(false),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3249,5 +3742,193 @@ mod tests {
         );
         let b = chapter_base("x", "x", "x", 10, false, None);
         assert_eq!(b.victory, [Condition::DefeatAll]);
+    }
+
+    /// A story that sets flag 7, then a battle whose setup brings Yuan Shao into the army.
+    fn story_then_battle() -> Scene {
+        Scene {
+            blocks: vec![
+                block(vec![record(
+                    RUN,
+                    0,
+                    vec![
+                        instr("dialogue", &[("text", 2)]),
+                        instr("set_flag", &[("flag", 7), ("clear", 0)]),
+                    ],
+                )]),
+                block(vec![
+                    record(
+                        RUN,
+                        0,
+                        vec![
+                            instr("load_map", &[("map", 0x3010)]),
+                            instr("set_allegiance", &[("person", 9), ("army", 0)]),
+                            instr("dialogue", &[("text", 1)]),
+                            instr("battle_setup", &[]),
+                            instr("battle_roster", &[]),
+                        ],
+                    ),
+                    record(RUN, 1, vec![instr("begin_battle", &[])]),
+                ]),
+            ],
+        }
+    }
+
+    #[test]
+    fn the_scripts_flags_and_joining_persons_are_read_in_one_pass() {
+        let mut flags = ScriptFlags::default();
+        flags.add(&story_then_battle());
+        assert_eq!(flags.settable, BTreeSet::from([7]));
+        assert!(flags.used.contains(&7), "{:?}", flags.used);
+        assert!(flags.battle_set.is_empty(), "{:?}", flags.battle_set);
+        assert_eq!(flags.joining, BTreeSet::from([9]));
+    }
+
+    /// The chapters' parts, who is in the army at their battle and the campaign's steps, as
+    /// `pack::convert_battles` assembles them.
+    #[test]
+    fn the_chapters_assemble_into_army_plan_and_steps() {
+        let scene = story_then_battle();
+        let names = names();
+        let song_key = |_: u16| None;
+        let settable = BTreeSet::from([7]);
+        let src = PartSources {
+            names: &names,
+            song_key: &song_key,
+            settable: &settable,
+            pictures: &PICTURES,
+        };
+        let mut chapters = Chapters::default();
+        chapters.add_scene(1, 0, &scene, &Text, &src);
+        assert_eq!(chapters.parts.len(), 2);
+        assert!(matches!(chapters.parts[0].2, Part::Story { block: 0 }));
+        assert!(matches!(
+            chapters.parts[1].2,
+            Part::Battle {
+                block: 1,
+                map: 16,
+                leg: 0
+            }
+        ));
+        // The setup's join is a scene before the battle's camp.
+        let battle = (1, 0, 1, 0);
+        assert_eq!(chapters.befores[&battle].0, "c1_s0_b1_before");
+        assert!(chapters.keep_reached().is_empty());
+        assert_eq!(chapters.joined().collect::<Vec<_>>(), ["yuan_shao"]);
+
+        let battle_set = BTreeSet::new();
+        let plan = ArmyPlan::new(&chapters, BTreeSet::new(), BTreeSet::new(), &battle_set);
+        let part = plan.part(battle);
+        assert_eq!(part, Some(1));
+        assert_eq!(plan.part((1, 0, 0, 0)), None, "a story is no battle part");
+        assert_eq!(plan.army_at("yuan_shao", part), ARMY_IN);
+        // Not moved by the story: in the army only when starting in it or joining otherwise.
+        assert_eq!(plan.army_at("liu_bei", part), ARMY_OUT);
+        let plan = ArmyPlan::new(
+            &chapters,
+            BTreeSet::from(["liu_bei".to_string()]),
+            BTreeSet::new(),
+            &battle_set,
+        );
+        assert_eq!(plan.army_at("liu_bei", part), ARMY_IN);
+        // The story sets flag 7 outright on the only way to the battle; flag 8 stays clear.
+        assert_eq!(plan.known_flag(7, 1), Some(true));
+        assert_eq!(plan.known_flag(8, 1), Some(false));
+        // A flag a battle sets is never fixed by the story.
+        let battle_set = BTreeSet::from([7]);
+        let plan = ArmyPlan::new(&chapters, BTreeSet::new(), BTreeSet::new(), &battle_set);
+        assert_eq!(plan.known_flag(7, 1), None);
+
+        // The campaign's steps: the story, then the battle with its setup's scene.
+        let none = |_: &str| None;
+        let title = |id: &str, _: u8| Some(format!("{id} camp"));
+        let (steps, story, notes) =
+            chapters.campaign_steps(&title, &none, &BTreeMap::new(), &BTreeSet::new());
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(steps.len(), 2);
+        assert_eq!(
+            steps[0].kind,
+            StepKind::Story {
+                scene: "c1_s0_story0".into()
+            }
+        );
+        let StepKind::Battle {
+            battle,
+            title,
+            before,
+            ..
+        } = &steps[1].kind
+        else {
+            panic!("{:?}", steps[1]);
+        };
+        assert_eq!(
+            (battle.as_str(), title.as_str(), before.as_deref()),
+            ("c1_s0_b1", "c1_s0_b1 camp", Some("c1_s0_b1_before"))
+        );
+        assert!(story.contains("\n== c1_s0_story0\n"), "{story}");
+        assert!(
+            story.contains("\n== c1_s0_b1_before\n@join yuan_shao\n"),
+            "{story}"
+        );
+        let scenes = hero_core::script::parse_drama("t.drama", &story).unwrap();
+        assert_eq!(scenes.len(), 2);
+
+        // A battle that was not converted is left out, with its scenes.
+        let (steps, story, notes) = chapters.campaign_steps(
+            &|_: &str, _: u8| None,
+            &none,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+        );
+        assert_eq!(steps.len(), 1);
+        assert!(!story.contains("c1_s0_b1_before"), "{story}");
+        assert_eq!(
+            notes,
+            ["c1_s0_b1: not converted; the campaign goes on without it"]
+        );
+    }
+
+    /// A part only another block's choice leads to, which the conversion does not offer, is
+    /// left out with a note.
+    #[test]
+    fn parts_the_story_does_not_reach_are_left_out() {
+        let names = names();
+        let song_key = |_: u16| None;
+        let src = PartSources {
+            names: &names,
+            song_key: &song_key,
+            settable: &SETTABLE,
+            pictures: &PICTURES,
+        };
+        // Block 0 goes on with block 2: block 1 is never reached.
+        let scene = Scene {
+            blocks: vec![
+                block(vec![record(
+                    RUN,
+                    0,
+                    vec![
+                        instr("dialogue", &[("text", 2)]),
+                        instr("goto_block", &[("block", 2)]),
+                    ],
+                )]),
+                block(vec![record(
+                    RUN,
+                    0,
+                    vec![instr("dialogue", &[("text", 4)])],
+                )]),
+                block(vec![record(
+                    RUN,
+                    0,
+                    vec![instr("dialogue", &[("text", 2)])],
+                )]),
+            ],
+        };
+        let mut chapters = Chapters::default();
+        chapters.add_scene(2, 3, &scene, &Text, &src);
+        assert_eq!(chapters.parts.len(), 3);
+        let notes = chapters.keep_reached();
+        assert_eq!(chapters.parts.len(), 2);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].starts_with("SNR2 scene 3 block 1:"), "{notes:?}");
     }
 }

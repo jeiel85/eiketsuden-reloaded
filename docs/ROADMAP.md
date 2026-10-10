@@ -469,6 +469,9 @@ DOSBox 등 에뮬레이터로 돌려 본 적도 없다"** 고 적혀 있었다. 
   4. 캠페인 조립
 
   `chapters.rs`나 새 `chapter_battles.rs`로 옮긴다. **동작이 바뀌지 않아야 한다**: M1-2의 diff 요약이 "변화 없음"이면 통과다.
+  - **결과 (1–4)**: `chapters.rs`의 `ScriptFlags`(스크립트 플래그·합류 인물, 장면 읽기 세 번 → 두 번), `Chapters`(`add_scene`·
+    `keep_reached`·`campaign_steps`), `ArmyPlan`(전투마다 군의 무장·이야기가 정하는 플래그)과 `pack.rs`의 `chapter_jobs`로 옮겼다.
+    `convert_battles`는 1153줄 → 820줄. 합성 단위 테스트로 확인했고, M1-2의 diff 요약은 원작 데이터가 있는 곳에서 확인해야 한다.
 - **M6-2. 원작과 대응이 없는 기본 팩 무장 정리**
   - 어떤 전투·장면도 쓰지 않는 기본 팩 무장을 `officers.toml`에서 뺀다.
   - 함께 고칠 것: `tools/assets/portraits.toml`, 얼굴 파일, `build.py --check`의 고아 검사(`build.py:88-102`).
