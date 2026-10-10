@@ -12,11 +12,14 @@ What it replaces:
   cliff faces, castle walls and paving, and y-sorted trees, peaks and buildings. The original's
   16-px chips are not used, so the new pictures follow the cells (32 px), not the original's chip
   details.
-* **Light cavalry** (`gfx/units/light_cavalry_<side>.png`): two frames like the original's map icon,
-  laid out the way hero-import's `unit_sheet` lays out the original's.
+* **Every unit sheet** (`gfx/units/<sprite>_<side>.png`, the 25 sprite keys of the original pack ×
+  side colours: 19 classes, Liu Bei's three class icons, Cao Cao, Lü Bu and the confusion icon).
+  `units.py` builds them from parts (head, body, legs, weapon, offhand, horse, wheels, banner) so
+  they share one style; two frames each like the original's map icons, laid out the way
+  hero-import's `unit_sheet` lays out the original's. The build stops if the original pack has a
+  sheet no drawing covers.
 
-Everything else (faces, other classes, scenes, duels, music, rules, stories) still comes from the
-original pack.
+Everything else (faces, scenes, duels, music, rules, stories) still comes from the original pack.
 
 ## Building
 
