@@ -116,7 +116,9 @@ pub const PACK_FORMAT: &str = "eiketsuden-original-pack";
 /// prologue ([`CHAPTER_FILES`] from 0, D21) instead of the base campaign continued.
 /// 22: the officers' classes, levels and equipment are the original's too, and the original
 /// battles' generic units have their persons' stats.
-pub const PACK_FORMAT_VERSION: u32 = 22;
+/// 23: the new art in `gfx/remake/` (D27, [`remake_path`]): the maps and cell pictures redrawn
+/// from the rules grids and this project's unit sheets.
+pub const PACK_FORMAT_VERSION: u32 = 23;
 /// `id` of the written pack (save games remember it, so they do not mix with the base pack's).
 pub const PACK_ID: &str = "original";
 /// Virtual canvas of the pack: the original's 640×400 screen, the size of its screen frames.
@@ -5370,13 +5372,18 @@ fn remake_seed(number: usize) -> u64 {
 /// A map's terrain grid: terrain ids row-major, width, height.
 type TerrainGrid = (Vec<&'static str>, usize, usize);
 
-/// The new-art pictures (PNG) of every map, drawn on all cores: a map takes a fraction of a
-/// second and the game converts at every launch.
+/// Most maps drawn at once by [`remake_maps`]: each drawing holds some 25 MB of buffers for the
+/// largest maps, so more threads would make a conversion's memory jump on many-core machines
+/// (16 threads: 54 MB → 416 MB peak) for little time saved.
+const REMAKE_THREADS: usize = 4;
+
+/// The new-art pictures (PNG) of every map, drawn on up to [`REMAKE_THREADS`] cores: a map
+/// takes a fraction of a second and the game converts at every launch.
 fn remake_maps(maps: &BTreeMap<usize, TerrainGrid>) -> Vec<(usize, Result<Vec<u8>, String>)> {
     let jobs: Vec<(&usize, &TerrainGrid)> = maps.iter().collect();
     let threads = std::thread::available_parallelism()
         .map_or(1, |n| n.get())
-        .clamp(1, jobs.len().max(1));
+        .clamp(1, REMAKE_THREADS.min(jobs.len().max(1)));
     let next = std::sync::atomic::AtomicUsize::new(0);
     let mut done: Vec<(usize, Result<Vec<u8>, String>)> = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..threads)
