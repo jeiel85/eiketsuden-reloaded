@@ -281,6 +281,8 @@ impl App {
         // store starts with it, `Media::for_settings`).
         ctx.media
             .set_public_portraits(ctx.settings.portraits == crate::settings::PortraitStyle::Public);
+        ctx.media
+            .set_remake_art(ctx.settings.art == crate::settings::ArtStyle::Remake);
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(music) = ctx.music.as_mut() {
             if music.poll(&ctx.media, &mut ctx.audio) {

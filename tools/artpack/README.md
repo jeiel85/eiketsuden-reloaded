@@ -1,41 +1,34 @@
-# Trial art pack
+# New art of the original mode
 
-A first try at the BACKLOG item "교체 아트 팩 레이어": new art drawn by code, laid over the original
-mode as a [layered pack](../../docs/MODDING.md#layered-packs-extends). No engine change is needed:
-a child pack's media files win over the original pack's by file name.
+Sprites for the original mode's new art (`docs/DECISIONS.md` D27, the setting "그림: 새 그림"). The
+converter (`crates/hero-import/src/remake.rs`) draws every battle map from its terrain grid with the map
+objects here and writes the unit sheets from the unit frames here, next to the original's pictures in
+the converted pack (`gfx/remake/`). The game shows them when the setting asks for them.
 
-What it replaces:
-
-* **Battle-map pictures** (`gfx/maps/hexz_*.png`, all 58 maps and the 15 cell pictures that battle
-  scripts swap in when a gate opens or a drawbridge comes down). `render_maps.py` draws each one
-  from the map's terrain grid in `<original pack>/maps/original.toml`: soft ground edges with noise,
-  cliff faces, castle walls and paving, and y-sorted trees, peaks and buildings. The original's
-  16-px chips are not used, so the new pictures follow the cells (32 px), not the original's chip
-  details.
-* **Every unit sheet** (`gfx/units/<sprite>_<side>.png`, the 25 sprite keys of the original pack ×
-  side colours: 19 classes, Liu Bei's three class icons, Cao Cao, Lü Bu and the confusion icon).
-  `units.py` builds them from parts (head, body, legs, weapon, offhand, horse, wheels, banner) so
-  they share one style; two frames each like the original's map icons, laid out the way
-  hero-import's `unit_sheet` lays out the original's. The build stops if the original pack has a
-  sheet no drawing covers.
-
-Everything else (faces, scenes, duels, music, rules, stories) still comes from the original pack.
+* `units.py` builds all 25 unit sprite keys of the original mode (19 classes, Liu Bei's three class
+  icons, Cao Cao, Lü Bu and the confusion icon) from parts (head, body, legs, weapon, offhand, horse,
+  wheels, banner) so they share one style; two 32×32 frames each, like the original's map icons, in
+  the three side colours.
+* `sprites.py` draws the map objects: trees, peaks, houses, tent, gatehouse, granary, treasury, field
+  and the closed gate.
+* `build.py` packs them into `crates/hero-import/assets/remake/{objects,units}.png` with `.txt`
+  indexes (`name x y w h`) that the converter cuts the atlases by.
 
 ## Building
 
-Needs Python 3.12+, Pillow and numpy, and an original pack made by `hero-tools original pack`.
+Needs Python 3.12+ and Pillow.
 
 ```sh
-python tools/artpack/build_pack.py data/original res/art-trial
-target/release/hero-tools validate res/art-trial
-target/release/eiketsuden --data res/art-trial
+python tools/artpack/build.py           # redraw the atlases after changing a sprite
+python tools/artpack/build.py --check   # what CI runs: the committed atlases match the code
 ```
 
-The pack gets its own id (`art_trial`), so it has its own save slots.
+`--check` compares pixels, not PNG bytes (Pillow builds compress differently). After redrawing, run the
+converter again (the game does at every launch; a pack written with `hero-tools original pack` needs a
+new run) to see the change.
 
-## Licence and sharing
+## Licence
 
-The drawing code and the sprites it draws are made for this project and dedicated to the public
-domain (CC0), like `tools/assets/art.py`. The generated map pictures follow the original's map
-layouts, so they are derived from the player's copy: keep the output folder on your computer like
-the original pack (`res/` is ignored by git), and do not commit or share it.
+The drawing code and the sprites are made for this project and dedicated to the public domain (CC0),
+like `tools/assets/art.py`. The map pictures the converter draws with them follow the original's map
+layouts, so they are made from the player's copy at conversion time and stay on their computer.

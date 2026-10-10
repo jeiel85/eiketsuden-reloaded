@@ -18,6 +18,9 @@
 //!                                     as the original battles on those maps (`crate::battles`)
 //! <out>/dramas/original_battles.drama the dialogue of their mid-battle events, from the scenario
 //! <out>/gfx/maps/hexz_NN_X_Y_OP.png   cells the events change (a gate opens, a bridge comes down)
+//! <out>/gfx/remake/maps/<key>.png     the new art (D27, `crate::remake`): every map and cell
+//!                                     picture above redrawn from the rules grid ...
+//! <out>/gfx/remake/units/<sheet>.png  ... and every unit sheet above drawn for this project
 //! ```
 //!
 //! Everything the pack does not hold (rules, officers, battles, dramas, music, the other
@@ -68,6 +71,7 @@ use crate::install::InstallDir;
 use crate::maps::{self, BattleMap, TERRAIN_COUNT};
 use crate::palette::{self};
 use crate::planar::{self, CELL_BYTES, CELL_PX};
+use crate::remake;
 use crate::sprites;
 use crate::text::TextEncoding;
 use crate::{ls11, table6};
@@ -2594,6 +2598,8 @@ fn convert_battles(
     );
     let mut scenes = 0usize;
     let mut pictures: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    // The new art's cell pictures, by the same keys (`docs/DECISIONS.md` D27).
+    let mut remake_pictures: BTreeMap<String, Result<Vec<u8>, String>> = BTreeMap::new();
     let files: BTreeSet<usize> = wanted
         .iter()
         .map(|p| p.file)
@@ -2832,6 +2838,23 @@ fn convert_battles(
                     key = format!("{}_{n}", cell_picture(&map_id, x, y, op & 0x7f));
                 }
                 pictures.insert(key.clone(), png);
+                if !remake_pictures.contains_key(&key) {
+                    // The map with every cell changed so far in this battle, this one included.
+                    let base = store
+                        .terrain
+                        .get(&number)
+                        .ok_or_else(|| format!("battle map {number} has no terrain grid"))?;
+                    let mut cells = base.clone();
+                    for (&(cx, cy), &(_, code)) in &cell_state {
+                        if let Some(id) = rules_terrain(code) {
+                            cells[cy * w + cx] = id;
+                        }
+                    }
+                    let picture =
+                        remake::render_cells(&cells, w, h, remake_seed(number), (x, y, 1, 1))
+                            .and_then(|img| img.to_png().map_err(|e| e.to_string()));
+                    remake_pictures.insert(key.clone(), picture);
+                }
                 Ok(Some((terrain.to_string(), Some(key))))
             };
             // Officers placed by route ([`chapters::army_at_steps`]), for the notes.
@@ -3261,6 +3284,14 @@ fn convert_battles(
     }
     for (key, png) in &pictures {
         out.write(&format!("gfx/maps/{key}.png"), png)?;
+    }
+    for (key, picture) in &remake_pictures {
+        match picture {
+            Ok(png) => out.write(&remake_path(&format!("maps/{key}")), png)?,
+            Err(e) => report
+                .errors
+                .push(format!("{key}: new-art cell picture: {e}")),
+        }
     }
     let mut duel_files = 0;
     if drama.contains("\n@duel ") {
@@ -4525,6 +4556,31 @@ fn convert_units(
         units_toml(&officers, &statuses).as_bytes(),
     )?;
     report.outputs += 1;
+    // The new art's sheets, one for every sheet written above (`docs/DECISIONS.md` D27).
+    let written: Vec<String> = status_sheets
+        .iter()
+        .map(|(_, key, _)| key.clone())
+        .chain(sheets.iter().map(|(key, _)| key.to_string()))
+        .chain(owned.iter().map(|(_, _, key, _)| key.clone()))
+        .collect();
+    for key in &written {
+        for side in ["player", "ally", "enemy"] {
+            let sheet = format!("{key}_{side}");
+            match remake::unit_sheet(&sheet).and_then(|s| {
+                s.map(|img| img.to_png().map_err(|e| e.to_string()))
+                    .transpose()
+            }) {
+                Ok(Some(png)) => {
+                    out.write(&remake_path(&format!("units/{sheet}")), &png)?;
+                    report.outputs += 1;
+                }
+                Ok(None) => report.notes.push(format!(
+                    "{sheet}: no new-art drawing; the new art shows the original's sheet"
+                )),
+                Err(e) => report.errors.push(format!("{sheet}: new-art sheet: {e}")),
+            }
+        }
+    }
     report.status = Status::Extracted;
     report.summary = format!(
         "{} classes, {} officer icons and {} status icon(s), 32×32 frames",
@@ -5292,12 +5348,76 @@ fn maps_file_header() -> String {
 /// The decoded battle maps, their chip banks and palette, for the battles' changed cells.
 pub struct MapStore {
     maps: BTreeMap<usize, BattleMap>,
+    /// Terrain id of every cell by map number, row-major (what the new art is drawn from).
+    terrain: BTreeMap<usize, Vec<&'static str>>,
     /// Chip bank by `HEXZCHP` entry (1 or 2).
     banks: BTreeMap<usize, Vec<u8>>,
     palette: Palette16,
 }
 
 type MapsResult = (KindReport, Vec<MapRecord>, Option<MapStore>);
+
+/// Path of the new art (`docs/DECISIONS.md` D27) for media key `key` (`maps/hexz_00`).
+pub fn remake_path(key: &str) -> String {
+    format!("gfx/{}/{key}.png", remake::REMAKE_DIR)
+}
+
+/// Noise seed of a map's new-art picture, so maps of similar layout still look different.
+fn remake_seed(number: usize) -> u64 {
+    0x6d61_7000 + number as u64
+}
+
+/// A map's terrain grid: terrain ids row-major, width, height.
+type TerrainGrid = (Vec<&'static str>, usize, usize);
+
+/// The new-art pictures (PNG) of every map, drawn on all cores: a map takes a fraction of a
+/// second and the game converts at every launch.
+fn remake_maps(maps: &BTreeMap<usize, TerrainGrid>) -> Vec<(usize, Result<Vec<u8>, String>)> {
+    let jobs: Vec<(&usize, &TerrainGrid)> = maps.iter().collect();
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .clamp(1, jobs.len().max(1));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut done: Vec<(usize, Result<Vec<u8>, String>)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut mine = Vec::new();
+                    loop {
+                        let k = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(&(&number, (cells, w, h))) = jobs.get(k) else {
+                            break;
+                        };
+                        let png = remake::render_map(cells, *w, *h, remake_seed(number))
+                            .and_then(|img| img.to_png().map_err(|e| e.to_string()));
+                        mine.push((number, png));
+                    }
+                    mine
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|w| w.join().unwrap_or_default())
+            .collect()
+    });
+    // A worker that panicked loses its maps: report them rather than leave them out silently.
+    for &number in maps.keys() {
+        if !done.iter().any(|(n, _)| *n == number) {
+            done.push((number, Err("the drawing panicked".into())));
+        }
+    }
+    done.sort_by_key(|(number, _)| *number);
+    done
+}
+
+/// The terrain id of every cell of a converted map's rules grid, row-major.
+fn remake_grid(rows: &str, legend: &BTreeMap<char, &'static str>) -> Vec<&'static str> {
+    rows.lines()
+        .flat_map(|row| row.chars())
+        .map(|glyph| legend.get(&glyph).copied().unwrap_or("plain"))
+        .collect()
+}
 
 fn convert_maps(
     install: &InstallDir,
@@ -5365,6 +5485,7 @@ fn convert_maps(
 
     let mut toml = maps_file_header();
     let mut records = Vec::new();
+    let mut terrain = BTreeMap::new();
     for (number, map) in &battle {
         let number = *number;
         let set = tables.chip_set_for(number);
@@ -5395,6 +5516,7 @@ fn convert_maps(
         };
         out.write(&format!("gfx/maps/{}.png", record.id), &png)?;
         report.outputs += 1;
+        terrain.insert(number, (remake_grid(&rows, &legend), w, h));
         let shown = decode(maps::display_name(raw));
         toml.push_str(&map_entry_toml(&record, &shown, &rows, &legend));
         records.push(record);
@@ -5403,6 +5525,21 @@ fn convert_maps(
         report.summary = "no battle map could be converted".into();
         return Ok((report, records, None));
     }
+    for (number, picture) in remake_maps(&terrain) {
+        match picture {
+            Ok(png) => {
+                out.write(&remake_path(&format!("maps/{}", map_id(number))), &png)?;
+                report.outputs += 1;
+            }
+            Err(e) => report
+                .errors
+                .push(format!("HEXZMAP.R3 entry {number}: new-art picture: {e}")),
+        }
+    }
+    let terrain = terrain
+        .into_iter()
+        .map(|(n, (cells, _, _))| (n, cells))
+        .collect();
     out.write(MAPS_FILE, toml.as_bytes())?;
     report.outputs += 1;
     report.status = if report.errors.is_empty() {
@@ -5434,6 +5571,7 @@ fn convert_maps(
     );
     let store = MapStore {
         maps: battle.into_iter().collect(),
+        terrain,
         banks,
         palette: *pal,
     };

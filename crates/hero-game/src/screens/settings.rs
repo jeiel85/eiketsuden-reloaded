@@ -1,6 +1,6 @@
 //! Settings overlay: volumes, text speed, battle animation speed, fullscreen (native), and the
 //! view-only choices beyond the original (`docs/DECISIONS.md` D25: portraits, danger range,
-//! battle presentation), which all start at the original's look.
+//! battle presentation; D27: map and unit art), which all start at the original's look.
 //!
 //! Values change with left/right, the ◀ ▶ arrows or confirm (steps forward) and apply
 //! immediately (the effect volume plays a sample); leaving the screen persists them through
@@ -9,7 +9,7 @@
 use crate::app::{Ctx, Screen, Transition};
 use crate::audio::sfx;
 use crate::gfx::{fill_rect, Align, TextStyle};
-use crate::settings::{cycle, BattleFx, BattleSpeed, PortraitStyle, Settings, TextSpeed};
+use crate::settings::{cycle, ArtStyle, BattleFx, BattleSpeed, PortraitStyle, Settings, TextSpeed};
 use crate::ui::format;
 use crate::ui::menu::{Menu, MenuEvent, MenuItem};
 use crate::ui::theme;
@@ -27,6 +27,8 @@ enum Row {
     /// The quick save slot of F5 / F9 and the menus' 순간 저장 (also F6).
     QuickSlot,
     Portraits,
+    /// The original's or the new map and unit art (D27).
+    Art,
     DangerRange,
     BattleFx,
     Defaults,
@@ -56,6 +58,7 @@ impl SettingsScreen {
         rows.extend([
             Row::QuickSlot,
             Row::Portraits,
+            Row::Art,
             Row::DangerRange,
             Row::BattleFx,
         ]);
@@ -70,7 +73,8 @@ impl SettingsScreen {
 
     /// Input: the settings and whether the chain holds the original mode's pack below the top
     /// ([`crate::platform::DataRoot::has_original_layer`]). Without one (the web build, the
-    /// base pack alone) the face choice changes nothing, so its row is shown disabled.
+    /// base pack alone) the face and art choices change nothing, so their rows are shown
+    /// disabled.
     fn items(&self, s: &Settings, faces: bool) -> Vec<MenuItem> {
         self.rows
             .iter()
@@ -102,6 +106,10 @@ impl SettingsScreen {
                 Row::Portraits => MenuItem::new("얼굴")
                     .detail(s.portraits.label())
                     .adjustable(),
+                Row::Art if !faces => MenuItem::new("그림")
+                    .detail("원작 데이터 없음")
+                    .enabled(false),
+                Row::Art => MenuItem::new("그림").detail(s.art.label()).adjustable(),
                 Row::DangerRange => MenuItem::new("위험 범위")
                     .detail(if s.danger_range { "켬" } else { "끔" })
                     .adjustable(),
@@ -138,6 +146,7 @@ impl SettingsScreen {
                 s.quick_slot = cycle(&slots, s.quick_slot, delta);
             }
             Row::Portraits => s.portraits = cycle(&PortraitStyle::ALL, s.portraits, delta),
+            Row::Art => s.art = cycle(&ArtStyle::ALL, s.art, delta),
             Row::DangerRange => s.danger_range = !s.danger_range,
             Row::BattleFx => s.battle_fx = cycle(&BattleFx::ALL, s.battle_fx, delta),
             Row::Defaults | Row::Back => return,
@@ -233,15 +242,21 @@ impl Screen for SettingsScreen {
     }
 }
 
+/// Height of the storage location line at the bottom of the canvas.
+const STORAGE_LINE: f32 = 16.0;
+
 /// The settings menu of `items` on a `canvas`: the window (menu plus its heading, see
-/// [`window_rect`]) centred on it.
+/// [`window_rect`]) centred in the space above the storage location line.
 fn placed(items: Vec<MenuItem>, canvas: Vec2) -> Menu {
     let mut menu = Menu::new(items);
     menu.framed = false;
-    let h = menu.rect().h;
+    let window_h = menu.rect().h + 32.0;
     menu.set_position(
         ((canvas.x - WIDTH) / 2.0).round() + 6.0,
-        ((canvas.y - h) / 2.0).round() + 10.0,
+        ((canvas.y - STORAGE_LINE - window_h) / 2.0)
+            .round()
+            .max(0.0)
+            + 26.0,
     );
     menu.set_width(WIDTH - 12.0);
     menu

@@ -275,6 +275,16 @@ base pack's text needs that Galmuri lacks; a Hanja a font lacks is drawn as a bl
 pack's text that the fonts in use lack; add them to the fonts (the base pack's are built by
 `tools/assets/build_fonts.py`, which collects the pack's Hanja) or avoid them.
 
+## New art of the original mode — `gfx/remake/`
+
+The original mode's pack (written by the converter, never shipped) also holds this project's new art
+(`docs/DECISIONS.md` D27): `gfx/remake/maps/<key>.png` for every battle-map picture and cell picture it
+writes under `gfx/maps/`, and `gfx/remake/units/<sheet>.png` for every unit sheet under `gfx/units/`,
+same sizes and layouts. With the setting "그림: 새 그림" the game looks up `maps/…` and `units/…` textures
+as `remake/<key>` through the whole chain first, then as themselves, so a pack (or a mod above the
+original pack) may also ship its own `gfx/remake/` files. The sprites the converter draws them from are
+`crates/hero-import/assets/remake/` (CC0, `tools/artpack/build.py`).
+
 ## Licensing
 
 Every third-party file must be listed in the repository's `CREDITS.md` with author, licence and source URL. Only
