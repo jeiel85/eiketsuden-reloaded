@@ -42,8 +42,15 @@ def main() -> None:
     args = ap.parse_args()
     if not (args.original / "pack.toml").is_file():
         sys.exit(f"{args.original}: no pack.toml (make it with `hero-tools original pack`)")
+    original, out = args.original.resolve(), args.out.resolve()
+    # Writing into the original pack (or a folder inside it) would overwrite its own files.
+    if out == original or original in out.parents:
+        sys.exit(f"{args.out}: the output must be a folder outside the original pack {args.original}")
+    try:
+        extends = Path(os.path.relpath(original, out)).as_posix()
+    except ValueError:
+        sys.exit(f"{args.out}: must be on the same drive as the original pack {args.original} (`extends` is relative)")
     args.out.mkdir(parents=True, exist_ok=True)
-    extends = Path(os.path.relpath(args.original.resolve(), args.out.resolve())).as_posix()
     (args.out / "pack.toml").write_text(
         f"""# Trial art pack written by tools/artpack/build_pack.py: new battle-map pictures and unit
 # sheets over the original pack. The map pictures follow the original's map layouts, so
