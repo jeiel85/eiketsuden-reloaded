@@ -71,11 +71,12 @@ impl SettingsScreen {
         }
     }
 
-    /// Input: the settings and whether the chain holds the original mode's pack below the top
-    /// ([`crate::platform::DataRoot::has_original_layer`]). Without one (the web build, the
-    /// base pack alone) the face and art choices change nothing, so their rows are shown
-    /// disabled.
-    fn items(&self, s: &Settings, faces: bool) -> Vec<MenuItem> {
+    /// Input: the settings, whether the chain holds the original mode's pack below the top
+    /// ([`crate::platform::DataRoot::has_original_layer`]) and whether this launch's conversion
+    /// left out the new art's maps (`Ctx::remake_maps_missing`). Without an original pack (the
+    /// web build, the base pack alone) the face and art choices change nothing, so their rows
+    /// are shown disabled.
+    fn items(&self, s: &Settings, faces: bool, maps_missing: bool) -> Vec<MenuItem> {
         self.rows
             .iter()
             .map(|row| match row {
@@ -109,6 +110,9 @@ impl SettingsScreen {
                 Row::Art if !faces => MenuItem::new("그림")
                     .detail("원작 데이터 없음")
                     .enabled(false),
+                Row::Art if s.art == ArtStyle::Remake && maps_missing => MenuItem::new("그림")
+                    .detail("새 그림 · 맵은 재시작 후")
+                    .adjustable(),
                 Row::Art => MenuItem::new("그림").detail(s.art.label()).adjustable(),
                 Row::DangerRange => MenuItem::new("위험 범위")
                     .detail(if s.danger_range { "켬" } else { "끔" })
@@ -123,7 +127,11 @@ impl SettingsScreen {
     }
 
     fn refresh(&mut self, ctx: &Ctx) {
-        let items = self.items(&ctx.settings, ctx.data_root.has_original_layer());
+        let items = self.items(
+            &ctx.settings,
+            ctx.data_root.has_original_layer(),
+            ctx.remake_maps_missing,
+        );
         self.menu.set_items(items);
     }
 
@@ -184,7 +192,11 @@ impl Screen for SettingsScreen {
     }
 
     fn on_enter(&mut self, ctx: &mut Ctx, _how: crate::app::Enter) {
-        let items = self.items(&ctx.settings, ctx.data_root.has_original_layer());
+        let items = self.items(
+            &ctx.settings,
+            ctx.data_root.has_original_layer(),
+            ctx.remake_maps_missing,
+        );
         self.menu = placed(items, ctx.gfx.size());
     }
 
@@ -281,7 +293,7 @@ mod tests {
         }
         assert!(screen.rows.contains(&Row::QuickSlot));
         let canvas = crate::gfx::DEFAULT_CANVAS;
-        let menu = placed(screen.items(&Settings::default(), true), canvas);
+        let menu = placed(screen.items(&Settings::default(), true, false), canvas);
         let window = window_rect(menu.rect());
         assert!(window.y >= 0.0, "{window:?}");
         // The storage line takes the last 16 pixels.
@@ -298,7 +310,10 @@ mod tests {
             .position(|&r| r == Row::QuickSlot)
             .unwrap();
         let mut s = Settings::default();
-        assert_eq!(screen.items(&s, true)[at].detail.as_deref(), Some("1 / 4"));
+        assert_eq!(
+            screen.items(&s, true, false)[at].detail.as_deref(),
+            Some("1 / 4")
+        );
         let slots: Vec<u8> = (1..=crate::saves::QUICK_SLOTS).collect();
         assert_eq!(cycle(&slots, 1, -1), 4);
         s.next_quick_slot();
@@ -317,11 +332,35 @@ mod tests {
             .position(|&r| r == Row::Portraits)
             .unwrap();
         let s = Settings::default();
-        let off = &screen.items(&s, false)[at];
+        let off = &screen.items(&s, false, false)[at];
         assert!(!off.enabled && !off.adjustable);
         assert_eq!(off.detail.as_deref(), Some("원작 데이터 없음"));
-        let on = &screen.items(&s, true)[at];
+        let on = &screen.items(&s, true, false)[at];
         assert!(on.enabled && on.adjustable);
         assert_eq!(on.detail.as_deref(), Some(s.portraits.label()));
+    }
+
+    /// The art row (D27): disabled without an original layer; with the new art chosen after a
+    /// conversion that left out its maps, it says the maps follow at the next launch.
+    #[test]
+    fn the_art_row_says_when_the_maps_follow() {
+        let screen = SettingsScreen::new();
+        let at = screen.rows.iter().position(|&r| r == Row::Art).unwrap();
+        let mut s = Settings::default();
+        let off = &screen.items(&s, false, false)[at];
+        assert!(!off.enabled);
+        assert_eq!(off.detail.as_deref(), Some("원작 데이터 없음"));
+        assert_eq!(
+            screen.items(&s, true, true)[at].detail.as_deref(),
+            Some("원작")
+        );
+        s.art = ArtStyle::Remake;
+        assert_eq!(
+            screen.items(&s, true, false)[at].detail.as_deref(),
+            Some("새 그림")
+        );
+        let pending = &screen.items(&s, true, true)[at];
+        assert!(pending.adjustable);
+        assert_eq!(pending.detail.as_deref(), Some("새 그림 · 맵은 재시작 후"));
     }
 }

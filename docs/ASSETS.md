@@ -282,7 +282,10 @@ The original mode's pack (written by the converter, never shipped) also holds th
 writes under `gfx/maps/`, and `gfx/remake/units/<sheet>.png` for every unit sheet under `gfx/units/`,
 same sizes and layouts. With the setting "그림: 새 그림" the game looks up `maps/…` and `units/…` textures
 as `remake/<key>` through the whole chain first, then as themselves, so a pack (or a mod above the
-original pack) may also ship its own `gfx/remake/` files. The sprites the converter draws them from are
+original pack) may also ship its own `gfx/remake/` files — and has to, for its pictures to show with the
+new art: a mod's plain `gfx/units/…` loses to the original pack's `gfx/remake/units/…` then. The game's
+own conversion draws the new maps only while the setting asks for them (`hero-tools original pack` always
+does); the unit sheets are always written. The sprites the converter draws them from are
 `crates/hero-import/assets/remake/` (CC0, `tools/artpack/build.py`).
 
 ## Licensing

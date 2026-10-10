@@ -221,6 +221,11 @@ pub struct PackOptions {
     /// Render the original's music ([`MUSIC_KEYS`]). It takes several seconds, so the game's
     /// conversion at every start leaves it out; `hero-tools original pack` sets it.
     pub music: bool,
+    /// Draw the new art's battle maps and cell pictures (D27, [`crate::remake`]). They take a
+    /// couple of seconds, against some 0.2 s for the rest of a conversion without music, so the
+    /// game's conversion at every start draws them only while the setting asks for the new art;
+    /// `hero-tools original pack` always sets it. The new unit sheets are always written.
+    pub remake_maps: bool,
     /// The pack chain's campaign, which the original's chapters past it continue
     /// ([`CHAPTER_FILES`]); `None`: those chapters are not converted.
     pub campaign: Option<hero_core::campaign::CampaignDef>,
@@ -298,6 +303,7 @@ impl PackOptions {
             game_rules: Some(parent.rules.clone()),
             item_defs: parent.items.values().cloned().collect(),
             music: false,
+            remake_maps: false,
             campaign: Some(parent.campaign.clone()),
             base_fingerprint: None,
         }
@@ -695,7 +701,7 @@ fn convert(
         .map(|t| t.id.as_str())
         .chain(rule_terrain.iter().flatten().map(String::as_str))
         .collect();
-    let (maps, map_records, map_store) = convert_maps(
+    let (mut maps, map_records, map_store) = convert_maps(
         install,
         encoding,
         &exe,
@@ -704,6 +710,9 @@ fn convert(
         output,
         with_exe(KindReport::new(Status::Extracted, true, "")),
     )?;
+    if let (true, Some(store)) = (options.remake_maps, map_store.as_ref()) {
+        write_remake_maps(store, output, &mut maps)?;
+    }
     progress(5);
 
     // The officers come before the battles: the chapters' stories let the added ones join.
@@ -2840,9 +2849,9 @@ fn convert_battles(
                     key = format!("{}_{n}", cell_picture(&map_id, x, y, op & 0x7f));
                 }
                 pictures.insert(key.clone(), png);
-                if !remake_pictures.contains_key(&key) {
+                if options.remake_maps && !remake_pictures.contains_key(&key) {
                     // The map with every cell changed so far in this battle, this one included.
-                    let base = store
+                    let (base, _, _) = store
                         .terrain
                         .get(&number)
                         .ok_or_else(|| format!("battle map {number} has no terrain grid"))?;
@@ -4565,6 +4574,7 @@ fn convert_units(
         .chain(sheets.iter().map(|(key, _)| key.to_string()))
         .chain(owned.iter().map(|(_, _, key, _)| key.clone()))
         .collect();
+    let mut undrawn = Vec::new();
     for key in &written {
         for side in ["player", "ally", "enemy"] {
             let sheet = format!("{key}_{side}");
@@ -4576,12 +4586,16 @@ fn convert_units(
                     out.write(&remake_path(&format!("units/{sheet}")), &png)?;
                     report.outputs += 1;
                 }
-                Ok(None) => report.notes.push(format!(
-                    "{sheet}: no new-art drawing; the new art shows the original's sheet"
-                )),
+                Ok(None) => undrawn.push(sheet),
                 Err(e) => report.errors.push(format!("{sheet}: new-art sheet: {e}")),
             }
         }
+    }
+    if !undrawn.is_empty() {
+        report.notes.push(format!(
+            "no new-art drawing for {}; the new art shows the original's sheets there",
+            undrawn.join(", ")
+        ));
     }
     report.status = Status::Extracted;
     report.summary = format!(
@@ -5350,8 +5364,8 @@ fn maps_file_header() -> String {
 /// The decoded battle maps, their chip banks and palette, for the battles' changed cells.
 pub struct MapStore {
     maps: BTreeMap<usize, BattleMap>,
-    /// Terrain id of every cell by map number, row-major (what the new art is drawn from).
-    terrain: BTreeMap<usize, Vec<&'static str>>,
+    /// Terrain grid of every map by number (what the new art is drawn from).
+    terrain: BTreeMap<usize, TerrainGrid>,
     /// Chip bank by `HEXZCHP` entry (1 or 2).
     banks: BTreeMap<usize, Vec<u8>>,
     palette: Palette16,
@@ -5372,14 +5386,37 @@ fn remake_seed(number: usize) -> u64 {
 /// A map's terrain grid: terrain ids row-major, width, height.
 type TerrainGrid = (Vec<&'static str>, usize, usize);
 
-/// Most maps drawn at once by [`remake_maps`]: each drawing holds some 25 MB of buffers for the
+/// Draw the new art's map pictures (D27) into the pack, reporting with the maps.
+fn write_remake_maps(
+    store: &MapStore,
+    out: &mut Output,
+    report: &mut KindReport,
+) -> Result<(), ExtractError> {
+    for (number, picture) in draw_remake_maps(&store.terrain) {
+        match picture {
+            Ok(png) => {
+                out.write(&remake_path(&format!("maps/{}", map_id(number))), &png)?;
+                report.outputs += 1;
+            }
+            Err(e) => report
+                .errors
+                .push(format!("HEXZMAP.R3 entry {number}: new-art picture: {e}")),
+        }
+    }
+    if !report.errors.is_empty() && report.status == Status::Extracted {
+        report.status = Status::Partial;
+    }
+    Ok(())
+}
+
+/// Most maps drawn at once by [`draw_remake_maps`]: each drawing holds some 25 MB of buffers for the
 /// largest maps, so more threads would make a conversion's memory jump on many-core machines
 /// (16 threads: 54 MB → 416 MB peak) for little time saved.
 const REMAKE_THREADS: usize = 4;
 
 /// The new-art pictures (PNG) of every map, drawn on up to [`REMAKE_THREADS`] cores: a map
 /// takes a fraction of a second and the game converts at every launch.
-fn remake_maps(maps: &BTreeMap<usize, TerrainGrid>) -> Vec<(usize, Result<Vec<u8>, String>)> {
+fn draw_remake_maps(maps: &BTreeMap<usize, TerrainGrid>) -> Vec<(usize, Result<Vec<u8>, String>)> {
     let jobs: Vec<(&usize, &TerrainGrid)> = maps.iter().collect();
     let threads = std::thread::available_parallelism()
         .map_or(1, |n| n.get())
@@ -5418,11 +5455,12 @@ fn remake_maps(maps: &BTreeMap<usize, TerrainGrid>) -> Vec<(usize, Result<Vec<u8
     done
 }
 
-/// The terrain id of every cell of a converted map's rules grid, row-major.
+/// The terrain id of every cell of a converted map's rules grid, row-major. `map_rows` builds
+/// the legend from the same rows, so every glyph has an entry.
 fn remake_grid(rows: &str, legend: &BTreeMap<char, &'static str>) -> Vec<&'static str> {
     rows.lines()
         .flat_map(|row| row.chars())
-        .map(|glyph| legend.get(&glyph).copied().unwrap_or("plain"))
+        .map(|glyph| legend[&glyph])
         .collect()
 }
 
@@ -5532,21 +5570,17 @@ fn convert_maps(
         report.summary = "no battle map could be converted".into();
         return Ok((report, records, None));
     }
-    for (number, picture) in remake_maps(&terrain) {
-        match picture {
-            Ok(png) => {
-                out.write(&remake_path(&format!("maps/{}", map_id(number))), &png)?;
-                report.outputs += 1;
-            }
-            Err(e) => report
-                .errors
-                .push(format!("HEXZMAP.R3 entry {number}: new-art picture: {e}")),
-        }
+    let unknown = remake::unknown_terrain(
+        terrain
+            .values()
+            .flat_map(|(cells, _, _)| cells.iter().copied()),
+    );
+    if !unknown.is_empty() {
+        report.notes.push(format!(
+            "the new art has no drawing for terrain {}; those cells show the ground around them",
+            unknown.into_iter().collect::<Vec<_>>().join(", ")
+        ));
     }
-    let terrain = terrain
-        .into_iter()
-        .map(|(n, (cells, _, _))| (n, cells))
-        .collect();
     out.write(MAPS_FILE, toml.as_bytes())?;
     report.outputs += 1;
     report.status = if report.errors.is_empty() {

@@ -12,7 +12,9 @@
 //!
 //! A picture depends only on the grid and global pixel coordinates (hash noise, no random
 //! state), so a window of a map ([`render_cells`]) is exactly the same pixels as that part of the
-//! whole map ([`render_map`]): the cell pictures fit seamlessly into the whole-map picture.
+//! whole map ([`render_map`]): a cell picture drawn from the unchanged grid fits seamlessly. A
+//! changed cell is redrawn alone, so what the change does to its neighbours (a wall's shadow on
+//! the cell below, ground edges) stays as the whole-map picture drew it (BACKLOG).
 
 use crate::image::PngError;
 use std::collections::BTreeMap;
@@ -323,6 +325,31 @@ impl Ground {
 
 fn is_wallish(t: &str) -> bool {
     matches!(t, "wall" | "closed_gate")
+}
+
+/// Terrain the renderer draws something of its own for (besides the grounds).
+const OBJECTS: [&str; 10] = [
+    "wall",
+    "closed_gate",
+    "bridge",
+    "fence",
+    "house",
+    "village",
+    "barracks",
+    "fort",
+    "granary",
+    "treasury",
+];
+
+/// The terrain ids among `cells` the renderer has no drawing for: their cells show the ground
+/// around them (for the converter's report).
+pub fn unknown_terrain<'a>(
+    cells: impl IntoIterator<Item = &'a str>,
+) -> std::collections::BTreeSet<&'a str> {
+    cells
+        .into_iter()
+        .filter(|t| Ground::of(t).is_none() && !OBJECTS.contains(t))
+        .collect()
 }
 
 /// A map's terrain ids, one per cell, row-major.
@@ -1148,7 +1175,7 @@ mod tests {
     fn a_window_is_the_same_pixels_as_that_part_of_the_whole_map() {
         let (cells, w, h) = sample();
         let whole = render_map(&cells, w, h, 7).unwrap();
-        for (x, y) in [(0, 0), (9, 3), (1, 4), (13, 6), (6, 2), (12, 2)] {
+        for (x, y) in (0..h).flat_map(|y| (0..w).map(move |x| (x, y))) {
             let part = render_cells(&cells, w, h, 7, (x, y, 1, 1)).unwrap();
             assert_eq!(
                 part,
@@ -1179,6 +1206,17 @@ mod tests {
         let gate = at(&after, 1, 4);
         let green = gate.pixels.iter().filter(|p| p[1] > p[0] + 30).count();
         assert!(green < gate.pixels.len() / 10, "{green} green pixels");
+    }
+
+    #[test]
+    fn unknown_terrain_is_listed() {
+        let (cells, _, _) = sample();
+        assert!(unknown_terrain(cells.iter().copied()).is_empty());
+        let odd = ["plain", "road", "gate", "wall", "road"];
+        assert_eq!(
+            unknown_terrain(odd).into_iter().collect::<Vec<_>>(),
+            ["gate", "road"]
+        );
     }
 
     #[test]

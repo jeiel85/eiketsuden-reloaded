@@ -69,6 +69,10 @@ pub struct Ctx {
     /// Seconds since startup.
     pub time: f64,
     pub frame: u64,
+    /// The original mode was converted at this launch without the new art's maps (the "그림"
+    /// setting was 원작, D27): choosing 새 그림 now changes the units, and the maps at the next
+    /// launch.
+    pub remake_maps_missing: bool,
 }
 
 impl Ctx {
@@ -97,6 +101,7 @@ impl Ctx {
             music: None,
             time: 0.0,
             frame: 0,
+            remake_maps_missing: false,
         }
     }
 
