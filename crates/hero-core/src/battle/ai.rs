@@ -728,17 +728,31 @@ impl<'a> Planner<'a> {
     /// like a `guard` post: it takes the best action from the tiles within that radius (the
     /// destination winning ties, so a reach trigger there still fires), else returns to the
     /// destination. It never chases beyond the post's radius, so a sortie is followed by more
-    /// fighting or by the way back, not by a sortie every other turn.
+    /// fighting or by the way back, not by a sortie every other turn. Far from it, a unit that
+    /// can take no tile closer (the way blocked by units, or for a lord only unsafe tiles
+    /// closer) fights like an `aggressive` one rather than wait for a way that `hold` and
+    /// `defensive` units never open.
     fn advance(&mut self, dest: Pos, reach: &[Pos]) -> (Pos, Option<Action>) {
         let origin = self.me.pos;
         // `reach` is already filtered (lord safety, scripted defeats): the destination is
         // entered only when it survives that.
         let dest_open = reach.contains(&dest);
         if origin.manhattan(dest) > GUARD_RADIUS {
-            return if dest_open {
-                self.act_at(dest)
-            } else {
-                self.approach_and_act(&[dest], reach)
+            if dest_open {
+                return self.act_at(dest);
+            }
+            let tile = self.approach(&[dest], reach);
+            if self.progresses(tile, &[dest]) {
+                return self.act_at(tile);
+            }
+            // Stalled: no tile it may take is closer (hostile units on the way, or for a lord
+            // only unsafe tiles closer). Waiting would change nothing against `defensive` and
+            // `hold` units, so it fights what it can reach, as `aggressive` does, instead.
+            return match self.best_from(reach, None).0 {
+                Some(c) if !self.careful() || c.score >= self.position_value(tile) => {
+                    (c.tile, Some(c.action))
+                }
+                _ => self.act_at(tile),
             };
         }
         let zone: Vec<Pos> = reach
