@@ -396,6 +396,7 @@ mod tests {
             battle: None,
             scene: None,
             pending_scenes: Vec::new(),
+            battle_replay: None,
         }
     }
 
