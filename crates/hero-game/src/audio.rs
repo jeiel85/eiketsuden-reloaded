@@ -2,7 +2,13 @@
 //!
 //! * [`Audio::play_bgm`] switches the music: the current track fades out, then the new one fades
 //!   in (looping). Requesting the track that is already playing does nothing, so screens can
-//!   call it every time they are entered. [`Audio::play_jingle`] plays a track once (victory,
+//!   call it every time they are entered. Music whose file marks a loop start
+//!   ([`Media::intro`]) plays its intro once and then repeats the loop: the intro is a sound of
+//!   its own, and the loop starts when the intro's length has passed on the clock (not by frame
+//!   times, which are capped and stop while a browser tab is in the background), so the switch
+//!   is at least a frame late and the two never overlap. While the music fades out during the
+//!   intro the switch waits: it goes with the track once the fade ends, and happens late if
+//!   the same music is wanted again before that. [`Audio::play_jingle`] plays a track once (victory,
 //!   defeat). [`Audio::stop_bgm`] fades to silence.
 //! * [`Audio::sfx`] plays an effect once (keys from `docs/ASSETS.md`, see [`sfx`]). Effects
 //!   that are not loaded yet are skipped (and requested, so the next use plays); the engine
@@ -19,6 +25,7 @@
 use crate::assets::{AssetState, Media};
 use crate::settings::Settings;
 use macroquad::audio::{play_sound, set_sound_volume, stop_sound, PlaySoundParams, Sound};
+use macroquad::time::get_time;
 
 /// Seconds for the music to fade out when it changes or stops.
 pub const FADE_OUT: f32 = 0.6;
@@ -104,6 +111,34 @@ struct Track {
     applied_volume: f32,
     /// Its file was replaced ([`Audio::reload_bgm`]): fade it out and start the new one.
     stale: bool,
+    /// While `sound` is the intro: the loop to play after it.
+    then: Option<Handoff<Sound>>,
+}
+
+/// The loop that follows an intro: `next` starts at [`get_time`] `at`.
+#[derive(Debug, Clone, PartialEq)]
+struct Handoff<S> {
+    next: S,
+    at: f64,
+}
+
+/// Advance an intro's switch to its loop.
+///
+/// * Input: the track's pending switch, whether the track is still the wanted music (`keep`),
+///   and the clock.
+/// * Output: the loop to start now (`then` is cleared then): its time has come and the track is
+///   wanted.
+/// * Why: a pure function, so the timing can be tested without an audio device. Not wanted
+///   means it is fading out for a change or a stop: starting its loop then would bring back
+///   music that is on its way out. The switch is kept rather than dropped, because the same
+///   music can be wanted again before the fade ends and the track fades back in; without its
+///   loop it would go silent after the intro. A track that fades out completely is dropped
+///   with its switch.
+fn step_handoff<S>(then: &mut Option<Handoff<S>>, keep: bool, now: f64) -> Option<S> {
+    if keep && then.as_ref().is_some_and(|h| now >= h.at) {
+        return then.take().map(|h| h.next);
+    }
+    None
 }
 
 /// The music/effects manager. Owned by [`crate::app::Ctx`].
@@ -226,6 +261,21 @@ impl Audio {
 
         // Fade out music that is no longer wanted.
         let keep = matches!((&self.current, &self.wanted), (Some(t), Some(w)) if t.request == *w && !t.stale);
+        // The loop after an intro.
+        if let Some(track) = self.current.as_mut() {
+            if let Some(next) = step_handoff(&mut track.then, keep, get_time()) {
+                // The intro is over by the clock; stop it in case the device started it late.
+                stop_sound(&track.sound);
+                play_sound(
+                    &next,
+                    PlaySoundParams {
+                        looped: track.request.looped,
+                        volume: track.applied_volume,
+                    },
+                );
+                track.sound = next;
+            }
+        }
         if let Some(track) = self.current.as_mut() {
             if !keep {
                 track.level -= dt / FADE_OUT;
@@ -252,19 +302,32 @@ impl Audio {
                 match media.sound_state(&key) {
                     AssetState::Ready => {
                         if let Some(sound) = media.sound(&key) {
+                            // With an intro, it plays once and the loop (a jingle: the rest)
+                            // follows.
+                            let (first, then) = match media.intro(&key) {
+                                Some((intro, seconds)) => (
+                                    intro,
+                                    Some(Handoff {
+                                        next: sound,
+                                        at: get_time() + seconds,
+                                    }),
+                                ),
+                                None => (sound, None),
+                            };
                             play_sound(
-                                &sound,
+                                &first,
                                 PlaySoundParams {
-                                    looped: w.looped,
+                                    looped: w.looped && then.is_none(),
                                     volume: 0.0,
                                 },
                             );
                             self.current = Some(Track {
                                 request: w,
-                                sound,
+                                sound: first,
                                 level: 0.0,
                                 applied_volume: 0.0,
                                 stale: false,
+                                then,
                             });
                         }
                     }
@@ -286,5 +349,42 @@ impl Audio {
                 track.applied_volume = volume;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_loop_follows_the_intro_on_the_clock() {
+        let mut then = Some(Handoff {
+            next: "loop",
+            at: 12.7,
+        });
+        assert_eq!(step_handoff(&mut then, true, 10.0), None);
+        assert_eq!(step_handoff(&mut then, true, 12.69), None);
+        assert!(then.is_some());
+        // Due: once (a long frame or a tab back from the background starts it at once).
+        assert_eq!(step_handoff(&mut then, true, 30.0), Some("loop"));
+        assert_eq!(then, None);
+        assert_eq!(step_handoff(&mut then, true, 31.0), None);
+    }
+
+    #[test]
+    fn a_fade_out_during_the_intro_holds_its_loop() {
+        let mut then = Some(Handoff {
+            next: "loop",
+            at: 12.7,
+        });
+        // Fading out: nothing starts, even when it is due.
+        assert_eq!(step_handoff(&mut then, false, 10.0), None);
+        assert_eq!(step_handoff(&mut then, false, 13.0), None);
+        assert!(then.is_some());
+        // Wanted again before the fade ended: the loop starts (late) instead of silence.
+        assert_eq!(step_handoff(&mut then, true, 13.1), Some("loop"));
+        // Without an intro there is nothing to switch to.
+        let mut none: Option<Handoff<&str>> = None;
+        assert_eq!(step_handoff(&mut none, true, 13.0), None);
     }
 }
