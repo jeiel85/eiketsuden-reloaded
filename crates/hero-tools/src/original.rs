@@ -261,8 +261,10 @@ pub fn run_pack(
     let fingerprint = pack::base_fingerprint(&parent, &DirSource { root: base.clone() })
         .map_err(|e| format!("cannot read the base pack {}: {e}", base.display()))?;
     let options = PackOptions {
-        // Written once, so the music (several seconds to render) is worth it here.
+        // Written once, so the music (several seconds to render) and the new art's maps are
+        // worth it here.
         music: true,
+        remake_maps: true,
         base_fingerprint: Some(fingerprint),
         ..PackOptions::for_pack(&parent, extends, edition)
     };

@@ -564,7 +564,11 @@ impl LoadingScreen {
             install,
             check.summary()
         );
-        let options = PackOptions::for_pack(base, extends, None);
+        let options = PackOptions {
+            // The new art's maps take seconds: drawn only while the setting asks for them (D27).
+            remake_maps: ctx.settings.art == crate::settings::ArtStyle::Remake,
+            ..PackOptions::for_pack(base, extends, None)
+        };
         self.status = "원작 변환".into();
         self.progress = 0.0;
         self.stage = Stage::Convert(Box::new((Conversion::start(dir, options), root)));
@@ -624,6 +628,11 @@ impl LoadingScreen {
             converted.files.len(),
             root.top_dir()
         );
+        let remake_prefix = format!("gfx/{}/maps/", hero_import::remake::REMAKE_DIR);
+        ctx.remake_maps_missing = !converted
+            .files
+            .keys()
+            .any(|k| k.starts_with(&remake_prefix));
         memfs::mount(root.top_dir(), converted.files);
         ctx.media = Media::for_settings(root.clone(), &ctx.settings);
         ctx.data_root = root;
