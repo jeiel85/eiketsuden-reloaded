@@ -330,6 +330,10 @@ pub struct BattleScreen {
     /// from the state, which has the animation's changes already) until the animation shows a
     /// terrain change or ends.
     replay_terrain: Option<BattleMap>,
+    /// The "그림" setting (D27) the map's picture layer was loaded with: the picture is baked
+    /// into [`MapRenderer`], so a change in the settings overlay reloads it
+    /// ([`BattleScreen::follow_art_setting`]). `None` until a picture is used.
+    picture_art: Option<crate::settings::ArtStyle>,
     /// Tiles the enemies could attack next phase (the "위험 범위" view option, D25 X4) with the
     /// [`player::danger_key`] they were computed for; refreshed only when that changes.
     danger: Option<(Vec<i64>, Vec<Pos>)>,
@@ -476,6 +480,7 @@ impl BattleScreen {
             shown_tiles: state.map_images.clone(),
             map_stale: false,
             replay_terrain: None,
+            picture_art: None,
             danger: None,
             state,
         }
@@ -511,7 +516,7 @@ impl BattleScreen {
         textures.extend(self.meta.picture.iter().cloned());
         textures.extend(self.frame.iter().map(|f| f.image.clone()));
         for e in &self.def().events {
-            for a in &e.actions {
+            for a in e.all_actions() {
                 if let EventAction::SetTerrain {
                     image: Some(key), ..
                 } = a
@@ -625,6 +630,7 @@ impl BattleScreen {
                             let size = vec2(picture.width(), picture.height());
                             if self.map.fits(size) {
                                 self.map.use_picture(picture);
+                                self.picture_art = Some(ctx.settings.art);
                                 return;
                             }
                             macroquad::logging::warn!(
@@ -669,6 +675,23 @@ impl BattleScreen {
     }
 
     // ----- helpers -----------------------------------------------------------------------
+
+    /// The "그림" setting changed since the map's picture layer was loaded (in the settings
+    /// overlay): load the picture of the new choice. The cell pictures and units follow by
+    /// themselves, because they are fetched from the media store every frame.
+    fn follow_art_setting(&mut self, art: crate::settings::ArtStyle) {
+        if self.picture_art.is_none_or(|used| used == art) {
+            return;
+        }
+        self.picture_art = None;
+        self.map = MapRenderer::new(&self.state.map, self.map.tile);
+        self.meta.picture = self
+            .def()
+            .map
+            .image
+            .as_ref()
+            .map(|key| format!("maps/{key}"));
+    }
 
     /// Size of a map tile in virtual pixels (the tileset's `tile_size`).
     fn tile(&self) -> f32 {
@@ -846,14 +869,22 @@ impl BattleScreen {
                     }
                 }
                 Cue::Terrain(pos) => self.show_terrain(pos),
-                Cue::Drama(scene) => out = self.open_drama(ctx, &scene),
+                Cue::Drama(scene, terrain) => out = self.open_drama(ctx, &scene, Some(terrain)),
             }
         }
         out
     }
 
     /// Show the drama scene `scene` over the battle.
-    fn open_drama(&mut self, ctx: &mut Ctx, scene: &str) -> Transition {
+    /// Show scene `scene` over the battle. `terrain`: the officers' terrain as the event that
+    /// plays it fired ([`BattleEvent::Drama`]); without it (a scene a quick save left queued,
+    /// or one without a duel), the terrain now.
+    fn open_drama(
+        &mut self,
+        ctx: &mut Ctx,
+        scene: &str,
+        terrain: Option<BTreeMap<String, String>>,
+    ) -> Transition {
         // The map stays drawn under the overlay without updates: never leave it shaken.
         self.scene.shake = 0.0;
         self.camera.shake = Vec2::ZERO;
@@ -868,7 +899,9 @@ impl BattleScreen {
             session.campaign.merge_battle_flags(&self.state);
         }
         self.waiting = Some(Waiting::Drama);
-        let terrain = officer_terrain(&self.pack, &self.state);
+        let terrain = terrain
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| self.state.officer_terrain(&self.pack));
         Transition::push(DramaScreen::battle_overlay(ctx, scene, terrain))
     }
 
@@ -880,7 +913,7 @@ impl BattleScreen {
                 self.waiting = Some(Waiting::Drama);
                 Transition::push(DramaScreen::restore(ctx, *resume))
             }
-            Some(QueuedScene::Fresh(scene)) => self.open_drama(ctx, &scene),
+            Some(QueuedScene::Fresh(scene)) => self.open_drama(ctx, &scene, None),
             None => Transition::None,
         }
     }
@@ -1837,6 +1870,8 @@ impl Screen for BattleScreen {
                 if self.state.outcome.is_none() {
                     self.play_phase_music(ctx, self.scene.hud.phase);
                 }
+                // The settings may have changed the art.
+                self.follow_art_setting(ctx.settings.art);
             }
         }
     }
@@ -2059,33 +2094,6 @@ fn fits_replay(r: &BattleReplay, state: &BattleState) -> bool {
     r.before.battle_id == state.battle_id && r.before.units.len() == state.units.len()
 }
 
-/// The terrain id under each officer of `state` on the map, for the duels of its scenes
-/// (`@duel ... terrain`). Retreated officers count at their last cell, after the ones on the
-/// map: a duel's loser retreats in the actions of the same event, which have all been applied
-/// when its scene plays (one that retreated turns earlier counts too, a case the converted
-/// duels do not have).
-fn officer_terrain(pack: &Pack, state: &BattleState) -> BTreeMap<String, String> {
-    let mut terrain = BTreeMap::new();
-    for on_map in [true, false] {
-        for u in &state.units {
-            let wanted = if on_map {
-                u.is_active()
-            } else {
-                u.state == hero_core::battle::UnitState::Retreated
-            };
-            let (Some(officer), true) = (u.officer.as_ref(), wanted) else {
-                continue;
-            };
-            if let Some(t) = state.terrain_at(pack, u.pos) {
-                terrain
-                    .entry(officer.to_string())
-                    .or_insert_with(|| t.id.to_string());
-            }
-        }
-    }
-    terrain
-}
-
 impl BattleScreen {
     /// One frame of [`Screen::update`], before the danger tiles are brought up to date.
     fn update_frame(&mut self, ctx: &mut Ctx) -> Transition {
@@ -2207,6 +2215,37 @@ mod tests {
         BattleScreen::new(pack, state, fresh, Vec2::new(480.0, 270.0))
     }
 
+    /// The map picture is baked into the renderer: a changed "그림" setting (D27) reloads it,
+    /// an unchanged one or a map without a picture keeps the renderer.
+    #[test]
+    fn a_changed_art_setting_reloads_the_map_picture() {
+        use crate::settings::ArtStyle;
+        // The prologue battle on a map with a picture layer, as the original mode's are.
+        let (pack, state) = testutil::sishui();
+        let mut pack = (*pack).clone();
+        pack.battles
+            .get_mut(&state.battle_id)
+            .expect("battle")
+            .map
+            .image = Some("hexz_00".into());
+        let mut s = BattleScreen::new(Rc::new(pack), state, true, Vec2::new(480.0, 270.0));
+        let picture = Some("maps/hexz_00".to_string());
+        s.meta.picture = None;
+        // No picture used yet: nothing to reload.
+        s.follow_art_setting(ArtStyle::Remake);
+        assert_eq!(s.meta.picture, None);
+        // Loaded with the original's art, the setting unchanged: kept.
+        s.picture_art = Some(ArtStyle::Original);
+        s.follow_art_setting(ArtStyle::Original);
+        assert_eq!(s.meta.picture, None);
+        assert_eq!(s.picture_art, Some(ArtStyle::Original));
+        // Changed: the picture is requested again and the renderer starts over.
+        s.follow_art_setting(ArtStyle::Remake);
+        assert_eq!(s.meta.picture, picture);
+        assert_eq!(s.picture_art, None);
+        assert!(!s.map.is_built());
+    }
+
     fn scene_record() -> SceneResume {
         SceneResume {
             kind: SceneKind::Overlay,
@@ -2278,9 +2317,11 @@ mod tests {
             &[
                 BattleEvent::Drama {
                     scene: "p1_duel".into(),
+                    terrain: BTreeMap::new(),
                 },
                 BattleEvent::Drama {
                     scene: "p1_outro".into(),
+                    terrain: BTreeMap::new(),
                 },
             ],
             &s.state,
@@ -2407,15 +2448,17 @@ mod tests {
                 .id
                 .to_string()
         };
-        let map = officer_terrain(&pack, &state);
+        let map = state.officer_terrain(&pack);
         assert_eq!(map[&name(officers[0])], under(&state, officers[0]));
         // Retreated by the event that plays the duel: still at their last cell.
         state.units[officers[1]].state = UnitState::Retreated;
-        let map = officer_terrain(&pack, &state);
+        let map = state.officer_terrain(&pack);
         assert_eq!(map[&name(officers[1])], under(&state, officers[1]));
         // Not yet on the map: not there.
         state.units[officers[1]].state = UnitState::Hidden;
-        assert!(!officer_terrain(&pack, &state).contains_key(&name(officers[1])));
+        assert!(!state
+            .officer_terrain(&pack)
+            .contains_key(&name(officers[1])));
     }
 
     /// The default (and smallest allowed), VGA and the largest allowed canvas.

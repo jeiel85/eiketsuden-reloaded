@@ -905,12 +905,6 @@ impl Recorder {
     }
 }
 
-/// Input: an empty stage and duel, the terrain of a battle scene and the recorded steps.
-/// Output: the stage and duel as they were, finished (no animation running).
-///
-/// Why this does not go through the screen's `present`: replaying needs none of what presenting
-/// does besides changing the stage (no sounds, no message boxes, no backlog), so it works without
-/// a window and can be checked against the live stage in tests.
 /// How far the timed step on screen got, for a quick save ([`SceneResume::playing`]).
 ///
 /// Input: what the screen is doing and the stage's darkness (0–1). Output: the record, `None`
@@ -939,6 +933,12 @@ fn split_playing_move(stage: &[Step], playing: Option<Playing>) -> (&[Step], Opt
     }
 }
 
+/// Input: an empty stage and duel, the terrain of a battle scene and the recorded steps.
+/// Output: the stage and duel as they were, finished (no animation running).
+///
+/// Why this does not go through the screen's `present`: replaying needs none of what presenting
+/// does besides changing the stage (no sounds, no message boxes, no backlog), so it works without
+/// a window and can be checked against the live stage in tests.
 fn replay_stage(
     stage: &mut Stage,
     duel: &mut Option<DuelView>,
