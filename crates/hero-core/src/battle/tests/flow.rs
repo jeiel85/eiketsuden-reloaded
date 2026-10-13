@@ -55,6 +55,7 @@ fn confused(turns: u8) -> ActiveStatus {
 fn drama(scene: &str) -> BattleEvent {
     BattleEvent::Drama {
         scene: scene.into(),
+        terrain: Default::default(),
     }
 }
 
@@ -1091,8 +1092,131 @@ fn event_conditions_read_battle_and_campaign_flags() {
     assert!(text.contains("cmp = \"==\""), "{text}");
 }
 
+/// A `when` action runs its actions in the event's order only while its flags allow, as an
+/// event's own `when`/`unless` do; it reads and writes as `type = "when"`.
+#[test]
+fn a_when_action_runs_its_part_only_while_the_flags_allow() {
+    let mut def = battle(OPEN_MAP);
+    let src = r#"
+trigger = { type = "turn_start", turn = 1, side = "enemy" }
+actions = [
+  { type = "give_gold", amount = 1 },
+  { type = "when", when = [{ flag = "route", cmp = "==", value = 2 }], actions = [
+    { type = "give_gold", amount = 10 },
+    { type = "set_flag", flag = "seen", value = 1 },
+  ] },
+  { type = "when", when = [{ flag = "route", cmp = "==", value = 3 }], actions = [
+    { type = "give_gold", amount = 100 },
+  ] },
+  { type = "when", unless = [{ flag = "seen" }], actions = [
+    { type = "give_gold", amount = 1000 },
+  ] },
+  { type = "give_gold", amount = 10000 },
+]
+"#;
+    let e: EventDef = toml::from_str(src).unwrap();
+    assert_eq!(e.all_actions().len(), 9);
+    def.events = vec![e];
+    let pack = pack_with(def);
+    let mut st = state(&pack);
+    st.start_flags.insert("route".into(), 2);
+    add(&mut st, &pack, Side::Player, "infantry", 1, p(3, 3));
+    add(&mut st, &pack, Side::Enemy, "infantry", 1, p(7, 7));
+    st.begin(&pack);
+    end_phase(&mut st, &pack); // enemy phase 1
+                               // The route's part ran and set `seen` before the last `when` was read.
+    assert_eq!(st.gold_found, 1 + 10 + 10000);
+    assert_eq!(st.flags.get("seen"), Some(&1));
+    // Written back as it was read.
+    let text = toml::to_string(&def_of(&pack).events[0]).unwrap();
+    let back: EventDef = toml::from_str(&text).unwrap();
+    assert_eq!(&back, &def_of(&pack).events[0]);
+    assert!(text.contains("type = \"when\""), "{text}");
+}
+
+/// What would run now: a `when` action's part only while its flags allow, so mutually
+/// exclusive guarded endings are told apart by the route.
+#[test]
+fn the_active_actions_follow_the_flags_of_their_when() {
+    let src = r#"
+trigger = { type = "turn_start", turn = 1, side = "enemy" }
+actions = [
+  { type = "when", when = [{ flag = "route", cmp = "==", value = 2 }], actions = [{ type = "victory" }] },
+  { type = "when", unless = [{ flag = "route", cmp = "==", value = 2 }], actions = [{ type = "defeat" }] },
+]
+"#;
+    let e: EventDef = toml::from_str(src).unwrap();
+    let pack = pack(OPEN_MAP);
+    let mut st = state(&pack);
+    st.start_flags.insert("route".into(), 2);
+    let active = st.active_actions(&e.actions);
+    assert!(active.contains(&&EventAction::Victory));
+    assert!(!active.contains(&&EventAction::Defeat));
+    st.start_flags.insert("route".into(), 1);
+    let active = st.active_actions(&e.actions);
+    assert!(active.contains(&&EventAction::Defeat));
+    assert!(!active.contains(&&EventAction::Victory));
+}
+
 fn def_of(pack: &Pack) -> &BattleDef {
     &pack.battles[BATTLE]
+}
+
+/// A scene with a duel carries the officers' terrain from when its `drama` action ran: a
+/// `set_terrain` later in the same event (whose actions all run before the scene shows) does
+/// not change the duel's ground. A scene without a duel carries none.
+#[test]
+fn a_duel_scene_keeps_the_ground_of_its_moment() {
+    let mut def = battle(
+        "
+        ........
+        ........",
+    );
+    let turn_one = Trigger::TurnStart {
+        turn: 1,
+        side: Side::Player,
+    };
+    def.events = vec![event(
+        turn_one,
+        vec![
+            EventAction::Drama {
+                scene: "duel".into(),
+            },
+            EventAction::Drama {
+                scene: "talk".into(),
+            },
+            EventAction::SetTerrain {
+                pos: p(3, 0),
+                terrain: "river".into(),
+                image: None,
+            },
+        ],
+    )];
+    let mut pack = pack_with(def);
+    let scenes = crate::script::parse_drama(
+        "t",
+        "== duel\n@duel guan_yu hua_xiong terrain\n@duel_end\n== talk\n@narr 말.\n",
+    )
+    .unwrap();
+    pack.scenes = scenes.into_iter().map(|s| (s.id.clone(), s)).collect();
+    let mut st = state(&pack);
+    let guan_yu = add(&mut st, &pack, Side::Player, "infantry", 1, p(3, 0));
+    let hua_xiong = add(&mut st, &pack, Side::Enemy, "infantry", 1, p(4, 0));
+    st.units[guan_yu].officer = Some("guan_yu".into());
+    st.units[hua_xiong].officer = Some("hua_xiong".into());
+    let ev = st.begin(&pack);
+    let dramas: Vec<&BattleEvent> = ev
+        .iter()
+        .filter(|e| matches!(e, BattleEvent::Drama { .. }))
+        .collect();
+    let BattleEvent::Drama { scene, terrain } = dramas[0] else {
+        unreachable!()
+    };
+    assert_eq!(scene, "duel");
+    assert_eq!(terrain["guan_yu"], "plain", "the ground before the change");
+    assert_eq!(terrain["hua_xiong"], "plain");
+    assert_eq!(st.map.terrain_at(p(3, 0)), Some("river"));
+    assert_eq!(dramas[1], &drama("talk"));
 }
 
 /// `set_terrain` changes the rules grid (movement follows it at once) and remembers the tile

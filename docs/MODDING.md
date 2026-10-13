@@ -893,6 +893,7 @@ Actions:
 | `set_stage` | `stage` | Move the battle to another stage (see above). |
 | `set_objective` | `text` | Replace the objective text the battle shows for the rest of the battle (a banner announces it); the victory and defeat conditions do not change. |
 | `set_terrain` | `pos`, `terrain`, `image` (opt.) | Change one tile's terrain for the rest of the battle (a gate opens, a drawbridge comes down); movement and defence follow the new terrain at once. `image` is a media key of `gfx/maps/<image>.png`, one tile in size, drawn over the tile from then on. Without it, a map drawn from the tileset shows the new terrain's tile, while a map with a picture layer keeps its picture there. |
+| `when` | `when` (opt.), `unless` (opt.), `actions` | Run `actions` here, in the event's order, only while the [flags](#flags) allow: every `when` condition holds and not all of `unless` (as an event's own `when`/`unless`). For the part of an event that depends on flags when it cannot be an event of its own: an event that moves the battle to another stage with `set_stage` and then does more on some routes (an event of its own after it would no longer be at its stage). The nested actions are checked like the event's own. |
 | `halve` | `side`, `stat` | Halve the `morale` or the `hp` of every unit of one side on the map (a fire or water attack, a ruse; the original's script command `2D`). `side = "enemy"` is the enemy's units, `"player"` (or `"ally"`) the player's units and their allies; units still to arrive are left alone. Morale falls as from an attack (under the original formulas a fall below 30 can confuse, and a confused unit left at 0 morale retreats, dropping its item); HP is rounded down and stays at least 1. |
 | `victory` / `defeat` | — | End the battle. |
 
@@ -1259,6 +1260,7 @@ hero-tools simulate <pack_dir> --campaign [--seeds N] [--choose SCENE=N[,N...]].
                                 [--level-bonus N] [--trace ID]
                                 [--difficulty easy|normal|hard] [--extended-rules]
 hero-tools info <pack_dir>
+hero-tools unused-officers <pack_dir>
 hero-tools --help | --version
 ```
 
@@ -1267,6 +1269,12 @@ hero-tools --help | --version
 * **info** — prints the pack's name, the packs it extends, licence, canvas size and how many terrain
   types, classes, strategies, items, officers, battles, scenes (with the number of dialogue lines) and
   campaign nodes it has.
+* **unused-officers** — lists the officers (id and name) that nothing in the pack names: the campaign's
+  starting army, a battle's units, `deploy.required`/`forbidden`, condition and event references and
+  `ai_target`s, and a scene's speakers, portraits, `@join`/`@leave`/`@away`/`@level`/`@class` and `@duel`.
+  Speakers and portraits count by officer id or by display name, as scenes resolve them, and `@show` also by
+  an officer's portrait key. A pack that extends the one checked may still use them, so run it on the pack you play (for the base pack's roster: the
+  original mode's pack).
 * **simulate** — refuses packs with validation errors, then plays every battle (campaign order first, then
   battles the campaign does not use; or only `--battle ID`) AI against AI with seeds `1..=N` (default 4),
   for at most 200 phases each. The player army is a new game's starting army plus the battle's required
