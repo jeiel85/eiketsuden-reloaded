@@ -1,0 +1,7 @@
+# Lint/format settings for the new-art scripts (same as tools/assets): `uvx ruff check tools/artpack` and
+# `uvx ruff format tools/artpack`.
+line-length = 120
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]

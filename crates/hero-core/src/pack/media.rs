@@ -483,7 +483,7 @@ impl MediaCheck {
         // Tile pictures of `set_terrain` events: one tile each.
         for b in pack.battles.values() {
             for (i, e) in b.events.iter().enumerate() {
-                for a in &e.actions {
+                for a in e.all_actions() {
                     let EventAction::SetTerrain {
                         image: Some(key), ..
                     } = a
