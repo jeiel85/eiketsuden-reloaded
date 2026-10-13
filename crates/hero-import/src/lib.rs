@@ -27,6 +27,7 @@
 //! | [`extract`] | P1–P3 | conversion into a media overlay folder with an `index.json` |
 //! | [`battles`] | original mode | the original battles (setup, rosters, treasures) re-staged onto the base pack's battles |
 //! | [`pack`] | original mode | conversion into a layered data pack on top of the base pack (portraits, unit sheets, a tileset learned from the battle maps) |
+//! | [`remake`] | original mode | the new art (D27): battle maps redrawn from their terrain grids, this project's unit sheets |
 //!
 //! Every structural invariant (directory chains, exact decoded lengths, full input consumption,
 //! table sizes) is checked, and a violation is reported with a precise error rather than
@@ -50,6 +51,7 @@ pub mod pack;
 pub mod palette;
 pub mod planar;
 pub mod probe;
+pub mod remake;
 pub mod scenario;
 pub mod sprites;
 pub mod table6;
