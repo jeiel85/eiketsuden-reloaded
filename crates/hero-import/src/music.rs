@@ -257,6 +257,9 @@ fn dot(w: &[f32], x: &[f32]) -> f32 {
     lanes.iter().sum::<f32>() + rest
 }
 
+/// How [`record`]'s error for a recording past its limit begins.
+const TOO_LONG: &str = "longer than";
+
 /// Song steps a second at most (tempo 255 overflows the step accumulator on every timer tick).
 const MAX_STEPS_PER_SECOND: f64 = 1.0 / TIMER_TICK;
 
@@ -341,21 +344,28 @@ fn render_checking(
         let own = c.first_end.unwrap_or(0).saturating_sub(c.loop_step).max(1);
         lcm(period, own).filter(|&p| p as f64 * seconds_per_step <= max_seconds)
     });
-    let Some(period) = period else {
-        let (samples, _) = record(song, rate, max_seconds, (0, end), 0, &mut cancelled)?;
-        return Ok(Rendered {
+    let once = |cancelled: &mut dyn FnMut() -> Result<(), String>| {
+        let (samples, _) = record(song, rate, max_seconds, (0, end), 0, cancelled)?;
+        Ok(Rendered {
             rate,
             intro: Vec::new(),
             samples,
             seamless: false,
             intro_seconds: 0.0,
-        });
+        })
+    };
+    let Some(period) = period else {
+        return once(&mut cancelled);
     };
     // The loop from the second time round, so the releases of its end ring into its start as
-    // they do in the game.
+    // they do in the game. A period the estimate let through but that records longer than
+    // `max_seconds` is played once as well.
     let window = (joint_start + period, joint_start + 2 * period);
     let (samples, intro_seconds) =
-        record(song, rate, max_seconds, window, joint_start, &mut cancelled)?;
+        match record(song, rate, max_seconds, window, joint_start, &mut cancelled) {
+            Err(e) if e.starts_with(TOO_LONG) => return once(&mut cancelled),
+            recorded => recorded?,
+        };
     let intro_seconds = intro_seconds.unwrap_or(0.0);
     // The intro from the first step (the time before it is silence) to the loop point. Its last
     // notes' releases stop there: the loop starts with the releases of its own end instead,
@@ -467,7 +477,7 @@ fn record(
         chip_samples += 1;
         chip_time -= 1.0;
         if samples.len() > limit {
-            return Err(format!("longer than {max_seconds} s"));
+            return Err(format!("{TOO_LONG} {max_seconds} s"));
         }
     }
     Ok((samples, intro_seconds))
@@ -1514,6 +1524,24 @@ mod tests {
             .unwrap()
             .seamless
         );
+    }
+
+    #[test]
+    fn a_loop_slower_than_its_estimate_plays_once() {
+        // The first track's loop sets half the tempo: the estimate from the first pass (about
+        // 35 s for the 2256-step period) fits 40 s, the recording (about 47 s) does not, so the
+        // song is played once from its start instead of failing.
+        let rendered = render(
+            &song_of(&[
+                &[57, 48, 40, 0xfe, 0xf2, 60, 57, 48, 40, 0xff],
+                &[45, 47, 40, 0xff],
+            ]),
+            22050,
+            40.0,
+        )
+        .unwrap();
+        assert!(!rendered.seamless);
+        assert!(rendered.intro.is_empty());
     }
 
     #[test]
