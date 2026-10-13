@@ -130,7 +130,7 @@ cargo run --release -p hero-tools -- validate data/base
 | 파일 형식 해독 | [STATUS 1절](docs/reverse-engineering/STATUS.md)의 추출 영역 | 주요 형식 모두 추출. 남음: 명령 일부의 의미, 오프닝·엔딩 코덱, 세이브 |
 
 원작 모드의 남은 일:
-전투 이벤트 스크립트의 삽화, 음악 곡 배정 확인과 루프 시작점, 직접 플레이로
+전투 이벤트 스크립트의 삽화, 음악 곡 배정 확인과 인트로 → 루프 전환 듣기, 직접 플레이로
 난이도 확인([BACKLOG](BACKLOG.md)). 기본 팩의 제2장 이후 캠페인은 만들지 않습니다(D21).
 
 ## 로드맵
