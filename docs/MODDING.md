@@ -1272,8 +1272,8 @@ hero-tools --help | --version
 * **unused-officers** — lists the officers (id and name) that nothing in the pack names: the campaign's
   starting army, a battle's units, `deploy.required`/`forbidden`, condition and event references and
   `ai_target`s, and a scene's speakers, portraits, `@join`/`@leave`/`@away`/`@level`/`@class` and `@duel`.
-  Speakers and portraits count by officer id or by display name, as scenes resolve them. A pack that extends
-  the one checked may still use them, so run it on the pack you play (for the base pack's roster: the
+  Speakers and portraits count by officer id or by display name, as scenes resolve them, and `@show` also by
+  an officer's portrait key. A pack that extends the one checked may still use them, so run it on the pack you play (for the base pack's roster: the
   original mode's pack).
 * **simulate** — refuses packs with validation errors, then plays every battle (campaign order first, then
   battles the campaign does not use; or only `--battle ID`) AI against AI with seeds `1..=N` (default 4),

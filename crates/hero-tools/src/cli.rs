@@ -44,7 +44,8 @@ USAGE:
 
     hero-tools unused-officers <pack_dir>
         List the officers that no battle, scene or the campaign's starting army names (by
-        officer id; a scene's speakers and portraits also by display name). A pack that extends
+        officer id; a scene's speakers and portraits also by display name, `@show` also by
+        portrait key). A pack that extends
         this one may still use them: run it on that pack too.
 
     A <pack_dir> whose pack.toml says `extends = \"../base\"` is loaded together with the

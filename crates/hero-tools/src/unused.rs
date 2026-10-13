@@ -55,8 +55,15 @@ pub fn used_officers(pack: &Pack) -> BTreeSet<&str> {
     for scene in pack.scenes.values() {
         for cmd in &scene.cmds {
             match cmd {
-                Cmd::Say { speaker: who, .. } | Cmd::Show { who, .. } => {
+                Cmd::Say { speaker: who, .. } => {
                     if let Some(o) = pack.speaker_officer(who) {
+                        name(&o.id);
+                    }
+                }
+                // `@show` also takes a portrait key, and the name card finds its officer by it.
+                Cmd::Show { who, .. } => {
+                    let by_key = || pack.officers.values().find(|o| o.portrait_key() == who);
+                    if let Some(o) = pack.speaker_officer(who).or_else(by_key) {
                         name(&o.id);
                     }
                 }
@@ -139,7 +146,7 @@ mod tests {
     fn every_way_of_naming_an_officer_counts() {
         let mut pack = pack("../hero-core/tests/fixtures/mini");
         let ids: Vec<String> = pack.officers.keys().cloned().collect();
-        assert!(ids.len() >= 3, "{ids:?}");
+        assert!(ids.len() >= 4, "{ids:?}");
         // Nothing names anyone: every officer is unused.
         pack.campaign.starting_officers.clear();
         pack.battles.clear();
@@ -148,13 +155,16 @@ mod tests {
         assert!(
             render(&pack).starts_with(&format!("{n} of {n} officers are not used", n = ids.len()))
         );
-        // A speaker by id, a portrait by id and a speaker by display name each name one (the
-        // drama runner shows that officer's portrait for all three); a free name does not.
+        // A speaker by id, a portrait by id, a speaker by display name and a portrait by the
+        // officer's own portrait key each name one (the drama runner shows that officer's
+        // portrait, the name card finds the officer by the key); a free name does not.
         let display = pack.officers[&ids[2]].name.clone();
+        pack.officers.get_mut(&ids[3]).unwrap().portrait = Some("young_face".into());
         let scene = hero_core::script::parse_drama(
             "t.drama",
             &format!(
-                "== s\n{}: 안녕\n@show {} left\n{display}: 이름으로\n아무개: 지나가는 사람\n",
+                "== s\n{}: 안녕\n@show {} left\n{display}: 이름으로\n@show young_face right\n\
+                 아무개: 지나가는 사람\n",
                 ids[0], ids[1]
             ),
         )
@@ -163,7 +173,12 @@ mod tests {
         pack.scenes.insert(scene.id.clone(), scene);
         assert_eq!(
             used_officers(&pack),
-            BTreeSet::from([ids[0].as_str(), ids[1].as_str(), ids[2].as_str()])
+            BTreeSet::from([
+                ids[0].as_str(),
+                ids[1].as_str(),
+                ids[2].as_str(),
+                ids[3].as_str()
+            ])
         );
         let report = render(&pack);
         assert!(!report.contains(&format!("  {} (", ids[0])), "{report}");
