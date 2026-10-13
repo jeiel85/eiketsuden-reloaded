@@ -2394,6 +2394,7 @@ mod tests {
         let before = s.state.clone();
         let duel = BattleEvent::Drama {
             scene: "p1_duel".into(),
+            terrain: BTreeMap::new(),
         };
         let first = [BattleEvent::PhaseStart {
             side: Side::Enemy,
