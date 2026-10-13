@@ -17,7 +17,9 @@
 //! * **Quick save** — F5 saves at any moment ([`crate::quicksave`]): the state is already past
 //!   whatever is animating, so it is saved as it is, together with the animation still playing
 //!   ([`BattleReplay`]: the state before it and its events, drama scenes included) or, once a
-//!   drama scene of it has started, the scenes it had queued but not started; loading shows
+//!   drama scene of it has started, without it. The scenes it had queued but not started are
+//!   saved as pending scenes either way (a game that does not know the replay still shows
+//!   them); a game that plays the replay takes them back out of that list. Loading shows
 //!   the scenes first, then plays the animation again from the state before it, and goes on
 //!   from the state. Before the objective window is dismissed (the battle has not begun) there
 //!   is nothing to save but the campaign: loading starts the battle from the top.
@@ -388,6 +390,8 @@ impl BattleScreen {
                     )),
                     None => {
                         let mut screen = BattleScreen::new(pack, state, false, ctx.gfx.size());
+                        let (pending_scenes, replay) =
+                            take_replay_scenes(pending_scenes, replay, &screen.state);
                         screen.queued_scenes = scene
                             .map(|s| QueuedScene::Resume(Box::new(s)))
                             .into_iter()
@@ -395,7 +399,7 @@ impl BattleScreen {
                             .collect();
                         // The animation the save interrupted: the map shows where the units
                         // stood before it, and it plays again after the title card.
-                        if let Some(r) = replay.filter(|r| fits_replay(r, &screen.state)) {
+                        if let Some(r) = replay {
                             screen.start_replay(r);
                         }
                         Box::new(screen)
@@ -929,8 +933,9 @@ impl BattleScreen {
 
     /// The animation to keep in a quick save ([`BattleReplay`]): the one playing, unless one of
     /// its drama scenes has started (that scene is saved on its own, and playing the events
-    /// again would show it twice). Its scenes not started yet play with it, so they are not
-    /// kept apart as pending scenes then.
+    /// again would show it twice). Its scenes not started yet are saved as pending scenes too
+    /// ([`BattleScreen::report`]); a game that plays the replay takes them back out
+    /// ([`take_replay_scenes`]).
     fn saved_replay(&self) -> Option<BattleReplay> {
         let r = self.replay.as_ref()?;
         if self.replay_on_title {
@@ -1859,7 +1864,8 @@ impl Screen for BattleScreen {
         match how {
             Enter::Fresh => {
                 self.start_loading(ctx);
-                self.play_phase_music(ctx, self.state.phase);
+                // The phase shown: a replayed animation may still be in the one before.
+                self.play_phase_music(ctx, self.scene.hud.phase);
             }
             Enter::Resumed => {
                 match self.waiting.take() {
@@ -2083,9 +2089,12 @@ impl BattleScreen {
                 QueuedScene::Fresh(id) => pending_scenes.push(id.clone()),
             }
         }
+        // The scenes the animation still owes are pending scenes either way: a game that does not
+        // know the replay (no save version marks it) still shows them and gets their `@set`s.
         let replay = self.saved_replay();
-        if replay.is_none() {
-            pending_scenes.extend(self.events.pending_dramas());
+        match &replay {
+            Some(r) => pending_scenes.extend(replay_scenes(r)),
+            None => pending_scenes.extend(self.events.pending_dramas()),
         }
         Some(ResumePoint::Battle {
             state: Box::new(self.state.clone()),
@@ -2100,6 +2109,39 @@ impl BattleScreen {
 /// same units (the replay's views are indexed like the state's).
 fn fits_replay(r: &BattleReplay, state: &BattleState) -> bool {
     r.before.battle_id == state.battle_id && r.before.units.len() == state.units.len()
+}
+
+/// The drama scenes a replay's events show, in order.
+fn replay_scenes(r: &BattleReplay) -> Vec<String> {
+    r.events
+        .iter()
+        .filter_map(|e| match e {
+            BattleEvent::Drama { scene, .. } => Some(scene.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The pending scenes and the replay a loaded quick save plays.
+///
+/// * Input: the save's pending scenes and replay, and the loaded state.
+/// * Output: the replay when it fits the state ([`fits_replay`]) and the pending scenes end with
+///   its scenes, which are then taken out (they play with it); else no replay and the pending
+///   scenes as saved, so the scenes are shown once either way.
+fn take_replay_scenes(
+    mut pending: Vec<String>,
+    replay: Option<BattleReplay>,
+    state: &BattleState,
+) -> (Vec<String>, Option<BattleReplay>) {
+    let Some(r) = replay.filter(|r| fits_replay(r, state)) else {
+        return (pending, None);
+    };
+    let scenes = replay_scenes(&r);
+    if !pending.ends_with(&scenes) {
+        return (pending, None);
+    }
+    pending.truncate(pending.len() - scenes.len());
+    (pending, Some(r))
 }
 
 impl BattleScreen {
@@ -2416,10 +2458,30 @@ mod tests {
             }) => (pending_scenes, replay),
             other => panic!("expected a battle report, got {other:?}"),
         };
-        // The duel has not started: it plays with the animation, not apart.
+        // The duel has not started: it is kept with the animation and, for games that do not
+        // know the replay, as a pending scene too; a game that plays the replay takes it out.
         let (pending, replay) = report(&s);
-        assert!(pending.is_empty(), "{pending:?}");
+        assert_eq!(pending, ["p1_duel"]);
         assert_eq!(replay.as_deref(), Some(&r));
+        let taken = take_replay_scenes(
+            vec!["p1_after".into(), "p1_duel".into()],
+            Some(r.clone()),
+            &s.state,
+        );
+        assert_eq!(taken, (vec!["p1_after".to_string()], Some(r.clone())));
+        // A replay that does not fit, or whose scenes are not the last pending ones, is not
+        // played: its scenes are shown from the pending list, once.
+        let mut other = r.clone();
+        other.before.units.pop();
+        let kept = vec!["p1_duel".to_string()];
+        assert_eq!(
+            take_replay_scenes(kept.clone(), Some(other), &s.state),
+            (kept.clone(), None)
+        );
+        assert_eq!(
+            take_replay_scenes(vec!["p1_after".into()], Some(r.clone()), &s.state),
+            (vec!["p1_after".to_string()], None)
+        );
         // Its scene has started (no drama beat left in the queue): saved as before.
         s.events = EventPlayer::default();
         let (pending, replay) = report(&s);
