@@ -2033,7 +2033,8 @@ impl Chapters {
                     };
                     let mut next = Next::Default;
                     // Its outro (played by the battle) and what it sets up for the next camp;
-                    // the officers the battle moved in or out of the army come first.
+                    // the officers the battle moved in or out of the army come first (in its
+                    // defeat scene too: the original moves them when the event runs, won or lost).
                     let army = army_scenes.get(&id).map_or("", String::as_str);
                     if let Some((outro_id, s)) = outro {
                         // (Its victory script is gated on the flag only where an event sets it.)
@@ -2059,7 +2060,7 @@ impl Chapters {
                         id.clone()
                     });
                     let defeat = self.defeats.get(&at).map(|(id, d)| {
-                        let _ = write!(story, "\n== {id}\n{}", d.text);
+                        let _ = write!(story, "\n== {id}\n{army}{}", d.text);
                         for note in &d.notes {
                             notes.push(format!("{id}: {note}"));
                         }
