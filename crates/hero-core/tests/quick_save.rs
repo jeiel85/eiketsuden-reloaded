@@ -48,6 +48,7 @@ fn resume_of(runner: &DramaRunner, choice: Option<Vec<String>>) -> SceneResume {
         terrain: BTreeMap::new(),
         backlog: Vec::new(),
         fingerprint: None,
+        playing: None,
     }
 }
 
