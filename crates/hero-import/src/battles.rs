@@ -1235,7 +1235,7 @@ fn event_problem(e: &EventDef, gone: &BTreeSet<String>) -> Option<String> {
         Trigger::Adjacent { a, b } => refs.extend(a.iter().map(String::as_str).chain([b.as_str()])),
         Trigger::TurnStart { .. } => {}
     }
-    for action in &e.actions {
+    for action in e.all_actions() {
         match action {
             EventAction::Spawn { group } => {
                 return Some(format!(
@@ -1626,18 +1626,22 @@ impl EventWriter<'_, '_> {
             return *end;
         }
         let taken = std::mem::take(&mut self.branches);
+        let mut plain = Vec::new();
+        let end = self.script(record, code, &mut plain, true);
+        let guarded = std::mem::replace(&mut self.branches, taken);
+        // Its flag-guarded parts run where the script reaches them, as `when` actions: the
+        // battle has already moved to its next stage, where an event of their own would not
+        // fire (2D's morale halving at `c2_s1_b16`, PR #96).
         let mut converted = Vec::new();
-        let end = self.script(record, code, &mut converted, true);
-        let dropped = std::mem::replace(&mut self.branches, taken);
-        if !dropped.is_empty() {
-            self.notes.push(format!(
-                "record {record}: its flag-guarded parts are left out (it runs between phases)"
-            ));
-            // Their lines were written already: nothing plays them now.
-            for action in dropped.iter().flat_map(|b| &b.actions) {
-                if let EventAction::Drama { scene } = action {
-                    remove_scene(&mut self.drama, scene);
-                }
+        for (when, unless, part) in parts_in_order(plain, guarded) {
+            if when.is_empty() && unless.is_empty() {
+                converted.extend(part);
+            } else {
+                converted.push(EventAction::When {
+                    when,
+                    unless,
+                    actions: part,
+                });
             }
         }
         actions.extend(converted.iter().cloned());
@@ -2922,10 +2926,9 @@ pub fn convert(
     }
     battle.events.extend(events);
     if battle.victory.is_empty()
-        && !battle
-            .events
-            .iter()
-            .any(|e| e.actions.contains(&EventAction::Victory) && e.stage.is_none_or(|s| s == 0))
+        && !battle.events.iter().any(|e| {
+            e.all_actions().contains(&&EventAction::Victory) && e.stage.is_none_or(|s| s == 0)
+        })
     {
         battle.victory = match orig.header.defeat_to_win {
             None => vec![Condition::DefeatAll],
@@ -2943,7 +2946,7 @@ pub fn convert(
     let spawned: BTreeSet<&str> = battle
         .events
         .iter()
-        .flat_map(|e| &e.actions)
+        .flat_map(|e| e.all_actions())
         .filter_map(|a| match a {
             EventAction::Spawn { group } => Some(group.as_str()),
             _ => None,
@@ -3019,39 +3022,59 @@ fn events_in_order(
     actions: Vec<EventAction>,
     branches: Vec<Branch>,
 ) -> Vec<EventDef> {
-    let event = |when: Vec<FlagCond>, unless: Vec<FlagCond>, actions: Vec<EventAction>| EventDef {
-        trigger: trigger.clone(),
-        once: true,
-        stage,
-        when,
-        unless,
-        actions,
-    };
+    parts_in_order(actions, branches)
+        .into_iter()
+        .map(|(when, unless, actions)| EventDef {
+            trigger: trigger.clone(),
+            once: true,
+            stage,
+            when,
+            unless,
+            actions,
+        })
+        .collect()
+}
+
+/// A script's parts in the order it reaches them: runs of what it does whatever the flags say
+/// (`actions`, with empty conditions) and its flag-guarded parts (`branches`, with theirs).
+/// Empty parts are left out.
+///
+/// Input: the script's own actions and its guarded parts, as [`EventWriter::script`] leaves
+/// them. Output: `(when, unless, actions)` per part.
+///
+/// Why: the order is one, whether the parts become events of their own
+/// ([`events_in_order`]) or `when` actions of one event (a script played between phases,
+/// [`EventWriter::on_the_way`]).
+fn parts_in_order(
+    actions: Vec<EventAction>,
+    branches: Vec<Branch>,
+) -> Vec<(Vec<FlagCond>, Vec<FlagCond>, Vec<EventAction>)> {
     let mut out = Vec::new();
     let mut start = 0;
     let mut waiting: Vec<Branch> = Vec::new();
+    let push = |out: &mut Vec<_>, p: Branch| {
+        if !p.actions.is_empty() {
+            out.push((p.when, p.unless, p.actions));
+        }
+    };
     for part in branches {
         let Some(at) = part.at else {
             waiting.push(part);
             continue;
         };
         if at > start && at <= actions.len() {
-            out.push(event(Vec::new(), Vec::new(), actions[start..at].to_vec()));
+            out.push((Vec::new(), Vec::new(), actions[start..at].to_vec()));
             start = at;
         }
         for p in waiting.drain(..).chain([part]) {
-            if !p.actions.is_empty() {
-                out.push(event(p.when, p.unless, p.actions));
-            }
+            push(&mut out, p);
         }
     }
     for p in waiting {
-        if !p.actions.is_empty() {
-            out.push(event(p.when, p.unless, p.actions));
-        }
+        push(&mut out, p);
     }
     if start < actions.len() {
-        out.push(event(Vec::new(), Vec::new(), actions[start..].to_vec()));
+        out.push((Vec::new(), Vec::new(), actions[start..].to_vec()));
     }
     out
 }
@@ -3978,6 +4001,123 @@ item = "wine"
         assert_eq!(duel.stage, Some(1));
         assert!(duel.actions.contains(&EventAction::Retreat {
             target: "boss".into()
+        }));
+    }
+
+    /// The flag-guarded part of a script played on the way to the next phase is a `when` action
+    /// in its place (after the stage moved, an event of its own would no longer fire): 2D's
+    /// morale halving and its line at `c2_s1_b16`.
+    #[test]
+    fn a_guarded_part_on_the_way_between_phases_is_a_when_action() {
+        let mut scene = scene();
+        scene.blocks[1].records = vec![
+            record(
+                0,
+                0,
+                false,
+                [0; 6],
+                vec![
+                    roster(vec![unit(54, 9, 4), unit(300, 8, 4)]),
+                    fields("load_map", &[("map", 0x3002)]),
+                ],
+            ),
+            record(0, 1, false, [0; 6], vec![op("begin_battle")]),
+            // Phase 0: turn 2 sets flag 91; 300 falling ends the phase.
+            record(
+                9,
+                3,
+                false,
+                [2, 0, 0, 0, 0, 0],
+                vec![fields("set_flag", &[("flag", 91), ("clear", 0)])],
+            ),
+            record(
+                12,
+                3,
+                false,
+                [44, 1, 0, 0, 0, 0],
+                vec![fields("narration", &[("text", 0x30)])],
+            ),
+            // On the way to phase 1: a line, then (with flag 91) the enemy's morale halved and
+            // a line about it, then a last line for everyone.
+            record(
+                0,
+                4,
+                false,
+                [0; 6],
+                vec![
+                    fields("dialogue", &[("text", 0x40)]),
+                    guard(2, vec![91], vec![]),
+                    fields("halve", &[("a", 1), ("b", 0)]),
+                    fields("dialogue", &[("text", 0x10)]),
+                    fields("narration", &[("text", 0x50)]),
+                ],
+            ),
+            record(
+                9,
+                5,
+                false,
+                [9, 0, 0, 0, 0, 0],
+                vec![fields("narration", &[("text", 0x50)])],
+            ),
+        ];
+        let orig = find_battle(&scene, 2, &[], None).unwrap();
+        let text = text();
+        let mut none = |_: Pos, _: u8| -> Result<CellChange, String> { Ok(None) };
+        let c = convert(
+            &base_battle(),
+            &orig,
+            &names(),
+            &pair("b", 1, 0, 2),
+            "hexz_02",
+            &mut EventSources {
+                text: &text,
+                cell_change: &mut none,
+            },
+        )
+        .unwrap();
+        let drama = |scene: &str| EventAction::Drama {
+            scene: scene.into(),
+        };
+        let way = [
+            EventAction::SetStage { stage: 1 },
+            drama("orig_b_4"),
+            EventAction::When {
+                when: vec![FlagCond {
+                    flag: "orig_b_91".into(),
+                    cmp: Compare::Ne,
+                    value: 0,
+                }],
+                unless: Vec::new(),
+                actions: vec![
+                    EventAction::Halve {
+                        side: Side::Enemy,
+                        stat: HalveStat::Morale,
+                    },
+                    drama("orig_b_4_2"),
+                ],
+            },
+            drama("orig_b_4_3"),
+        ];
+        let falls = c
+            .battle
+            .events
+            .iter()
+            .find(|e| matches!(e.trigger, Trigger::UnitDefeated { .. }))
+            .expect("the record that ends the phase");
+        assert!(falls.actions.ends_with(&way), "{falls:#?}");
+        assert!(
+            !c.notes
+                .iter()
+                .any(|n| n.contains("left out (it runs between phases)")),
+            "{:?}",
+            c.notes
+        );
+        // The guarded line's scene is kept, and the pack's checks see inside the `when`.
+        assert!(c.drama.contains("== orig_b_4_2\n"), "{}", c.drama);
+        hero_core::script::parse_drama("t", &c.drama).expect("scene ids are unique");
+        assert!(falls.all_actions().contains(&&EventAction::Halve {
+            side: Side::Enemy,
+            stat: HalveStat::Morale
         }));
     }
 

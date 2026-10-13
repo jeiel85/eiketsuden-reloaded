@@ -735,3 +735,49 @@ fn plans_one_unit_quickly_on_a_crowded_30x30_map() {
         );
     }
 }
+
+#[test]
+fn a_stalled_advance_fights_its_way() {
+    let pack = pack(
+        "
+........
+........
+........
+........
+........
+........
+........
+........
+........
+........
+........
+........",
+    );
+    let mut st = state(&pack);
+    // A lord heading for (0, 10): the tiles closer to it are unsafe or no closer, and the
+    // defensive and hold units in the way never come to it.
+    let lord = add(&mut st, &pack, Side::Player, "infantry", 10, p(0, 3));
+    st.units[lord].lord = true;
+    st.units[lord].ai = AiMode::Advance;
+    st.units[lord].ai_pos = Some(p(0, 10));
+    st.units[lord].hp = 656;
+    let blocker = add(&mut st, &pack, Side::Enemy, "infantry", 4, p(1, 5));
+    st.units[blocker].ai = AiMode::Hold;
+    let rider = add(&mut st, &pack, Side::Enemy, "cavalry", 2, p(0, 11));
+    st.units[rider].ai = AiMode::Defensive;
+    // Waiting would change nothing: it attacks the unit in its way from a safe tile.
+    let plan = st.ai_actions(&pack, lord);
+    assert_eq!(
+        last(&plan),
+        &Action::Attack {
+            unit: lord,
+            target: blocker
+        },
+        "{plan:?}"
+    );
+    // With the way clear it goes on instead.
+    st.units[blocker].pos = p(7, 0);
+    let plan = st.ai_actions(&pack, lord);
+    let to = move_target(&plan).expect("moves");
+    assert!(to.manhattan(p(0, 10)) < 7, "{plan:?}");
+}

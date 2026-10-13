@@ -108,6 +108,31 @@ impl PortraitStyle {
     }
 }
 
+/// Which art the original mode draws battle maps and units with (`docs/DECISIONS.md` D27, a
+/// view-only choice beyond the original). Only the original mode has a choice: its converted pack
+/// holds this project's new art next to the original's (`hero_import::remake`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtStyle {
+    /// The original's map pictures and unit icons.
+    #[default]
+    Original,
+    /// The new art: maps redrawn from the original's layouts, units drawn for this project
+    /// (see `crate::assets::Media`).
+    Remake,
+}
+
+impl ArtStyle {
+    pub const ALL: [ArtStyle; 2] = [ArtStyle::Original, ArtStyle::Remake];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ArtStyle::Original => "원작",
+            ArtStyle::Remake => "새 그림",
+        }
+    }
+}
+
 /// How hits are presented in battle (`docs/DECISIONS.md` D25 X5, a view-only choice beyond the
 /// original).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -151,6 +176,8 @@ pub struct Settings {
     // changed at any moment (they never touch a save).
     /// X2: original faces or public-domain portraits in the original mode.
     pub portraits: PortraitStyle,
+    /// D27: the original's map and unit art or the new art, in the original mode.
+    pub art: ArtStyle,
     /// X4: tint every tile an enemy could attack next phase while the player browses the map.
     pub danger_range: bool,
     /// X5: enhanced hit presentation in battle.
@@ -172,6 +199,7 @@ impl Default for Settings {
             original_dir: None,
             original_mode: false,
             portraits: PortraitStyle::Original,
+            art: ArtStyle::Original,
             danger_range: false,
             battle_fx: BattleFx::Original,
             quick_slot: 1,
@@ -338,12 +366,18 @@ mod tests {
         assert!(warn.is_none());
         assert_eq!(s.master_volume, 60);
         assert_eq!(
-            (s.portraits, s.danger_range, s.battle_fx),
-            (PortraitStyle::Original, false, BattleFx::Original)
+            (s.portraits, s.art, s.danger_range, s.battle_fx),
+            (
+                PortraitStyle::Original,
+                ArtStyle::Original,
+                false,
+                BattleFx::Original
+            )
         );
 
         let s = Settings {
             portraits: PortraitStyle::Public,
+            art: ArtStyle::Remake,
             danger_range: true,
             battle_fx: BattleFx::Enhanced,
             ..Settings::default()
@@ -352,6 +386,7 @@ mod tests {
         let json = store.get(SETTINGS_KEY).unwrap().unwrap();
         assert!(json.contains(r#""portraits": "public""#), "{json}");
         assert!(json.contains(r#""battle_fx": "enhanced""#), "{json}");
+        assert!(json.contains(r#""art": "remake""#), "{json}");
         assert_eq!(Settings::load(&store).0, s);
         assert_eq!(
             cycle(&PortraitStyle::ALL, PortraitStyle::Public, 1),

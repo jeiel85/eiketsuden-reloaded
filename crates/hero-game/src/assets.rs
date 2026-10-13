@@ -38,6 +38,13 @@
 //! ([`PUBLIC_SUFFIX`]), so switching back and forth swaps the pictures at once without reloading
 //! either set. Without an original pack in the chain the switch changes nothing.
 //!
+//! **New art** (`docs/DECISIONS.md` D27, the `Settings::art` choice): the original mode's pack
+//! holds this project's new battle-map pictures and unit sheets under `gfx/remake/`. With
+//! [`Media::set_remake_art`] on, `maps/…` and `units/…` textures are looked up as
+//! `remake/<key>` through the chain first and as themselves after, so a picture the new art lacks
+//! still shows the original's. They are cached under their own key ([`REMAKE_SUFFIX`]) like the
+//! public portraits. Without an original pack in the chain the switch changes nothing.
+//!
 //! [`Media::pump`] (called by the app every frame) advances at most [`MAX_IN_FLIGHT`] loads and
 //! decodes at most [`DECODES_PER_FRAME`] images per frame, so lazy loading never stalls a frame
 //! for long. Decoded music is large (PCM); [`Media::release_sound`] drops a track that is no
@@ -352,6 +359,11 @@ pub const UNKNOWN_PORTRAIT: &str = "portraits/_unknown";
 /// Appended to a portrait's texture key to cache its public-portrait variant (see the module
 /// docs); `#` never occurs in a media key.
 pub const PUBLIC_SUFFIX: &str = "#public";
+/// Appended to a map or unit texture's key to cache its new-art variant (see the module docs).
+pub const REMAKE_SUFFIX: &str = "#remake";
+/// Folder (under `gfx/`) of the original mode's new art (`hero_import::remake::REMAKE_DIR`,
+/// which the web build does not link).
+const REMAKE_DIR: &str = "remake";
 
 #[derive(Default)]
 struct Inner {
@@ -367,6 +379,8 @@ pub struct Media {
     inner: RefCell<Inner>,
     /// Portraits prefer the packs below the original mode's pack (see the module docs).
     public_portraits: Cell<bool>,
+    /// Maps and units prefer the original mode's new art (see the module docs).
+    remake_art: Cell<bool>,
 }
 
 impl Media {
@@ -377,15 +391,23 @@ impl Media {
             root,
             inner: RefCell::new(Inner::default()),
             public_portraits: Cell::new(false),
+            remake_art: Cell::new(false),
         }
     }
 
-    /// A media store on `root` that already follows the view settings (the face choice), so
-    /// a request in its first frame reads the right picture.
+    /// A media store on `root` that already follows the view settings (the face and art
+    /// choices), so a request in its first frame reads the right picture.
     pub fn for_settings(root: DataRoot, settings: &crate::settings::Settings) -> Media {
         let media = Media::new(root);
         media.set_public_portraits(settings.portraits == crate::settings::PortraitStyle::Public);
+        media.set_remake_art(settings.art == crate::settings::ArtStyle::Remake);
         media
+    }
+
+    /// Draw battle maps and units with the original mode's new art (D27); takes effect with
+    /// the next request.
+    pub fn set_remake_art(&self, on: bool) {
+        self.remake_art.set(on);
     }
 
     /// Show the public-domain portraits of the packs below the original mode's pack instead of
@@ -394,14 +416,17 @@ impl Media {
         self.public_portraits.set(on);
     }
 
-    /// Cache key of texture `key`: `<key>#public` for the public variant of a portrait (see the
-    /// module docs), else the key itself.
+    /// Cache key of texture `key`: `<key>#public` for the public variant of a portrait,
+    /// `<key>#remake` for the new-art variant of a map or unit (see the module docs), else the
+    /// key itself.
     fn texture_slot<'a>(&self, key: &'a str) -> Cow<'a, str> {
-        if self.public_portraits.get()
-            && key.starts_with("portraits/")
-            && self.root.has_original_layer()
-        {
+        if !self.root.has_original_layer() {
+            return Cow::Borrowed(key);
+        }
+        if self.public_portraits.get() && key.starts_with("portraits/") {
             Cow::Owned(format!("{key}{PUBLIC_SUFFIX}"))
+        } else if self.remake_art.get() && (key.starts_with("maps/") || key.starts_with("units/")) {
+            Cow::Owned(format!("{key}{REMAKE_SUFFIX}"))
         } else {
             Cow::Borrowed(key)
         }
@@ -411,6 +436,12 @@ impl Media {
     /// ([`Media::texture_slot`]). Built only when the texture is not cached yet.
     fn texture_paths(&self, key: &str, slot_key: &str) -> Vec<String> {
         let rel = format!("gfx/{key}.png");
+        if slot_key.ends_with(REMAKE_SUFFIX) {
+            // The new art through the whole chain, then the original's picture.
+            let mut paths = self.candidates(&[format!("gfx/{REMAKE_DIR}/{key}.png")]);
+            paths.extend(self.candidates(&[rel]));
+            return paths;
+        }
         if slot_key != key {
             if let Some(paths) = self.root.public_media_paths(&rel) {
                 return paths;
@@ -1123,6 +1154,73 @@ mod tests {
         plain.set_public_portraits(true);
         plain.texture_state("portraits/liu_bei");
         assert_eq!(jobs(&plain)[0].0, "portraits/liu_bei");
+    }
+
+    #[test]
+    fn the_new_art_is_looked_up_first_for_maps_and_units_under_its_own_key() {
+        let root = DataRoot::from_dir(std::path::Path::new("/d/original"), &[])
+            .with_parent_packs(["../base"])
+            .with_original_layer(Some(0));
+        let media = Media::new(root.clone());
+        let jobs = |m: &Media| -> Vec<(String, Vec<String>)> {
+            m.inner
+                .borrow()
+                .jobs
+                .iter()
+                .map(|j| match &j.kind {
+                    JobKind::Texture { key } => (key.clone(), j.paths.clone()),
+                    _ => unreachable!(),
+                })
+                .collect()
+        };
+        media.set_remake_art(true);
+        media.texture_state("units/archer_enemy");
+        media.texture_state("maps/hexz_14_12_11_2");
+        media.texture_state("portraits/liu_bei");
+        let all = jobs(&media);
+        assert_eq!(
+            all[0],
+            (
+                "units/archer_enemy#remake".to_string(),
+                vec![
+                    "/d/original/gfx/remake/units/archer_enemy.png".to_string(),
+                    "/d/original/../base/gfx/remake/units/archer_enemy.png".to_string(),
+                    "/d/original/gfx/units/archer_enemy.png".to_string(),
+                    "/d/original/../base/gfx/units/archer_enemy.png".to_string(),
+                ]
+            )
+        );
+        assert_eq!(all[1].0, "maps/hexz_14_12_11_2#remake");
+        assert_eq!(
+            all[1].1[0],
+            "/d/original/gfx/remake/maps/hexz_14_12_11_2.png"
+        );
+        // Other pictures keep the usual lookup.
+        assert_eq!(all[2].0, "portraits/liu_bei");
+        assert_eq!(
+            Media::texture_filter("units/archer_enemy#remake"),
+            FilterMode::Nearest
+        );
+
+        // Switching back asks for the original's picture again (both stay cached).
+        media.set_remake_art(false);
+        media.texture_state("units/archer_enemy");
+        assert_eq!(jobs(&media)[3].0, "units/archer_enemy");
+
+        // A store built for the settings uses the new art from its first request.
+        let settings = crate::settings::Settings {
+            art: crate::settings::ArtStyle::Remake,
+            ..Default::default()
+        };
+        let fresh = Media::for_settings(root, &settings);
+        fresh.texture_state("units/archer_enemy");
+        assert_eq!(jobs(&fresh)[0].0, "units/archer_enemy#remake");
+
+        // Without the original's pack in the chain the switch changes nothing.
+        let plain = Media::new(DataRoot::from_dir(std::path::Path::new("/p"), &[]));
+        plain.set_remake_art(true);
+        plain.texture_state("units/archer_enemy");
+        assert_eq!(jobs(&plain)[0].0, "units/archer_enemy");
     }
 
     /// While the face setting's variant of a portrait loads, the other variant is shown if it
