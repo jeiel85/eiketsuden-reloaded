@@ -373,6 +373,8 @@ struct Inner {
     intros: HashMap<String, (Sound, f64)>,
     icons: Option<Slot<IconIndex>>,
     jobs: VecDeque<Job>,
+    /// Keys of the media that failed to load since the last [`Media::take_failures`].
+    failures: Vec<String>,
 }
 
 /// Lazily loaded, cached textures, sounds and icons. See the module docs.
@@ -650,6 +652,14 @@ impl Media {
         self.inner.borrow().jobs.len()
     }
 
+    /// The keys whose load failed since the last call, in the order they were given up on (the
+    /// icon index as `gfx/ui/icons.toml`). Taking them clears the list, so a caller that reports
+    /// them once — the loading screen after its media wait — does not repeat itself; the log line
+    /// in [`Media::finish`] is written either way.
+    pub fn take_failures(&self) -> Vec<String> {
+        std::mem::take(&mut self.inner.borrow_mut().failures)
+    }
+
     /// Advance loading; called by the app once per frame.
     pub fn pump(&self) {
         let mut inner = self.inner.borrow_mut();
@@ -789,29 +799,32 @@ impl Media {
                     JobKind::IconIndex => "icon index".to_string(),
                 };
                 macroquad::logging::warn!("media: {} unavailable ({})", what, why);
-                match kind {
-                    JobKind::Texture { key } => {
-                        inner.textures.insert(key, Slot::Missing);
-                    }
-                    JobKind::Sound { key, .. } => {
-                        inner.sounds.insert(key, Slot::Missing);
-                    }
-                    JobKind::IconIndex => inner.icons = Some(Slot::Missing),
-                }
+                Self::give_up(inner, kind);
             }
             (kind, _) => {
                 // A job always produces the outcome of its own kind; keep the slot consistent
                 // if that invariant is ever broken.
                 macroquad::logging::error!("media: mismatched load outcome");
-                match kind {
-                    JobKind::Texture { key } => {
-                        inner.textures.insert(key, Slot::Missing);
-                    }
-                    JobKind::Sound { key, .. } => {
-                        inner.sounds.insert(key, Slot::Missing);
-                    }
-                    JobKind::IconIndex => inner.icons = Some(Slot::Missing),
-                }
+                Self::give_up(inner, kind);
+            }
+        }
+    }
+
+    /// Record that a job will never finish: its slot is `Missing` (callers draw their fallbacks)
+    /// and its key joins the list the loading screen reports ([`Media::take_failures`]).
+    fn give_up(inner: &mut Inner, kind: JobKind) {
+        match kind {
+            JobKind::Texture { key } => {
+                inner.textures.insert(key.clone(), Slot::Missing);
+                inner.failures.push(key);
+            }
+            JobKind::Sound { key, .. } => {
+                inner.sounds.insert(key.clone(), Slot::Missing);
+                inner.failures.push(key);
+            }
+            JobKind::IconIndex => {
+                inner.icons = Some(Slot::Missing);
+                inner.failures.push(ICON_INDEX.to_string());
             }
         }
     }
@@ -1482,6 +1495,50 @@ mod tests {
             .insert("bgm/title".into(), Slot::Missing);
         assert!(media.forget_sound("bgm/title"));
         assert!(!media.inner.borrow().sounds.contains_key("bgm/title"));
+    }
+
+    /// A failed load is remembered once for the loading screen, which reports it to the player
+    /// after its media wait; taking the list clears it so nothing is said twice.
+    #[test]
+    fn failed_loads_are_reported_once() {
+        let media = Media::new(DataRoot::from_dir(std::path::Path::new("/p"), &[]));
+        {
+            let mut inner = media.inner.borrow_mut();
+            Media::finish(
+                &mut inner,
+                JobKind::Texture {
+                    key: "bg/missing".into(),
+                },
+                Outcome::Failed("404".into()),
+            );
+            Media::finish(
+                &mut inner,
+                JobKind::Sound {
+                    key: "bgm/missing".into(),
+                },
+                Outcome::Failed("404".into()),
+            );
+            Media::finish(
+                &mut inner,
+                JobKind::IconIndex,
+                Outcome::Failed("404".into()),
+            );
+        }
+        // The slots still fail quietly as before, so callers keep drawing their fallbacks.
+        assert_eq!(
+            media
+                .inner
+                .borrow()
+                .textures
+                .get("bg/missing")
+                .map(Slot::state),
+            Some(AssetState::Missing)
+        );
+        assert_eq!(
+            media.take_failures(),
+            vec!["bg/missing", "bgm/missing", ICON_INDEX]
+        );
+        assert!(media.take_failures().is_empty(), "reported twice");
     }
 
     #[test]

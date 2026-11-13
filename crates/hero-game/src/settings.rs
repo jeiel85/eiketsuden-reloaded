@@ -185,6 +185,10 @@ pub struct Settings {
     /// The quick save slot F5 and F9 use, `1..=saves::QUICK_SLOTS` (changed with F6 or in the
     /// settings screen).
     pub quick_slot: u8,
+    /// End the player's phase by itself once every unit has acted (`AUTO_END_DELAY` in
+    /// `screens::battle`). Off, the phase waits for the player's "턴 종료" — for players who
+    /// want to check the map or a unit's details first.
+    pub auto_end_turn: bool,
 }
 
 impl Default for Settings {
@@ -203,6 +207,7 @@ impl Default for Settings {
             danger_range: false,
             battle_fx: BattleFx::Original,
             quick_slot: 1,
+            auto_end_turn: true,
         }
     }
 }
@@ -247,6 +252,22 @@ impl Settings {
         self.original_mode &= self.original_dir.is_some();
         self.quick_slot = self.quick_slot.clamp(1, crate::saves::QUICK_SLOTS);
         self
+    }
+
+    /// Reset every preference to its default, keeping the two things that are not preferences
+    /// of the settings screen: the window mode (switching it unexpectedly is jarring) and the
+    /// original-mode folder with its switch (the player's own copy, chosen in 원작 데이터; a
+    /// reset that forgot them would make the next launch fall back to the base pack).
+    pub fn reset_to_defaults(&mut self) {
+        let (fullscreen, original_dir, original_mode) = (
+            self.fullscreen,
+            self.original_dir.take(),
+            self.original_mode,
+        );
+        *self = Settings::default();
+        self.fullscreen = fullscreen;
+        self.original_dir = original_dir;
+        self.original_mode = original_mode;
     }
 
     /// The quick save slot F5 and F9 use.
@@ -350,6 +371,31 @@ mod tests {
             .unwrap();
         let (s, _) = Settings::load(&store);
         assert_eq!((s.original_dir, s.original_mode), (None, false));
+    }
+
+    #[test]
+    fn resetting_defaults_keeps_the_window_and_the_original_folder() {
+        let mut s = Settings {
+            master_volume: 10,
+            text_speed: TextSpeed::Instant,
+            danger_range: true,
+            fullscreen: true,
+            original_dir: Some(r"D:\games\hero\GAME".into()),
+            original_mode: true,
+            quick_slot: 3,
+            ..Settings::default()
+        };
+        s.reset_to_defaults();
+        let d = Settings::default();
+        assert_eq!(s.master_volume, d.master_volume);
+        assert_eq!(s.text_speed, d.text_speed);
+        assert!(!s.danger_range);
+        assert_eq!(s.quick_slot, 1);
+        // Not preferences of the settings screen: kept.
+        assert!(s.fullscreen);
+        assert_eq!(s.original_dir.as_deref(), Some(r"D:\games\hero\GAME"));
+        assert!(s.original_mode);
+        assert_eq!(s.original_to_play(), Some(r"D:\games\hero\GAME"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Title screen: artwork (`gfx/ui/title.png`, else the procedural backdrop), the logo and the
 //! main menu — 새 게임 / 이어하기 / 불러오기 / 원작 데이터 (native, unless `--data` chose the pack) /
-//! 설정 / 제작진 / 종료 (native only). 새 게임 first asks for its options: difficulty, free
+//! 조작 / 설정 / 제작진 / 종료 (native only). 새 게임 first asks for its options: difficulty, free
 //! editing and extended rules (DECISIONS D25).
 
 use super::backdrop::draw_backdrop;
@@ -33,6 +33,8 @@ enum Item {
     Load,
     /// The original mode: pick the install folder, switch modes (native only).
     Original,
+    /// Every key and pointer gesture of the game (also F1 anywhere).
+    Controls,
     Settings,
     Credits,
     Quit,
@@ -45,6 +47,7 @@ impl Item {
             Item::Continue => "이어하기",
             Item::Load => "불러오기",
             Item::Original => "원작 데이터",
+            Item::Controls => "조작",
             Item::Settings => "설정",
             Item::Credits => "제작진",
             Item::Quit => "종료",
@@ -71,7 +74,7 @@ impl TitleScreen {
         if cfg!(not(target_arch = "wasm32")) {
             items.push(Item::Original);
         }
-        items.extend([Item::Settings, Item::Credits]);
+        items.extend([Item::Controls, Item::Settings, Item::Credits]);
         if crate::platform::can_quit() {
             items.push(Item::Quit);
         }
@@ -164,6 +167,7 @@ impl TitleScreen {
                 None => Transition::None,
             },
             Item::Original => original_screen(),
+            Item::Controls => Transition::push(super::controls::ControlsScreen::new()),
             Item::Settings => Transition::push(SettingsScreen::new()),
             Item::Credits => Transition::push(CreditsScreen::new()),
             Item::Quit => {

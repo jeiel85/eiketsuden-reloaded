@@ -87,11 +87,11 @@ impl ErrorScreen {
             .iter()
             .map(|a| {
                 MenuItem::new(match a {
-                    Action::Retry(_) | Action::Reload => "다시 시도 (Retry)",
-                    Action::Title => "타이틀로 (Title)",
+                    Action::Retry(_) | Action::Reload => "다시 시도",
+                    Action::Title => "타이틀로",
                     Action::ChooseOriginal => "다른 폴더 고르기",
                     Action::BasePack => "기본 팩으로 계속",
-                    Action::Quit => "종료 (Quit)",
+                    Action::Quit => "종료",
                 })
             })
             .collect();
