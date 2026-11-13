@@ -138,11 +138,13 @@ fn chain_root(current: &DataRoot, chain: &PackChain) -> DataRoot {
         .with_original_layer(original)
 }
 
-/// A pack error for the error screen.
+/// A pack error for the error screen. The messages of `PackError` are English (they also go to
+/// the log and to the command line tools), so every variant is translated here.
 fn describe(e: &PackError) -> String {
     match e {
         PackError::Missing { file } => format!("{file}: 파일이 없습니다"),
-        other => other.to_string(),
+        PackError::Parse { file, msg } => format!("{file}: 내용을 읽을 수 없습니다 ({msg})"),
+        PackError::Invalid(msg) => msg.clone(),
     }
 }
 
@@ -312,7 +314,7 @@ impl LoadingScreen {
                 // A read error already names the file (path or URL).
                 let text = match result {
                     Ok(bytes) => String::from_utf8(bytes)
-                        .map_err(|_| format!("{path}: not valid UTF-8 text")),
+                        .map_err(|_| format!("{path}: UTF-8 텍스트가 아닙니다")),
                     Err(e) => Err(e),
                 };
                 let text = match (text, &chain) {
@@ -373,7 +375,7 @@ impl LoadingScreen {
                 self.progress = 0.1;
                 if !ctx.gfx.fonts.missing().is_empty() {
                     ctx.toast(format!(
-                        "Font missing: {}",
+                        "글꼴을 불러오지 못했습니다: {} (기본 글꼴로 표시합니다)",
                         ctx.gfx.fonts.missing().join(", ")
                     ));
                 }
@@ -411,7 +413,7 @@ impl LoadingScreen {
                 let mut errors = Vec::new();
                 for (rel, result) in batch.into_results() {
                     match result.and_then(|b| {
-                        String::from_utf8(b).map_err(|_| "not valid UTF-8 text".to_string())
+                        String::from_utf8(b).map_err(|_| "UTF-8 텍스트가 아닙니다".to_string())
                     }) {
                         Ok(text) => {
                             files.insert(rel, text);
@@ -499,9 +501,40 @@ impl LoadingScreen {
                 self.stage = Stage::Media { since: ctx.time };
             }
             Stage::Media { since } => {
-                if ctx.media.pending() > 0 && ctx.time - since < MEDIA_WAIT_SECONDS {
+                let timed_out = ctx.time - since >= MEDIA_WAIT_SECONDS;
+                if ctx.media.pending() > 0 && !timed_out {
                     self.stage = Stage::Media { since };
                     return Transition::None;
+                }
+                // Say what did not arrive. The media store logs failures and quietly draws
+                // fallbacks, which is right for a missing optional picture but leaves a player
+                // whose install is incomplete with no explanation; the loading screen reports it
+                // once, here, before the game starts.
+                let failed = ctx.media.take_failures();
+                if !failed.is_empty() {
+                    macroquad::logging::warn!(
+                        "media: {} files failed before the game started",
+                        failed.len()
+                    );
+                    let mut shown = failed
+                        .iter()
+                        .take(3)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if failed.len() > 3 {
+                        shown.push_str(&format!(" 외 {}개", failed.len() - 3));
+                    }
+                    ctx.toast(format!(
+                        "불러오지 못한 파일이 있습니다: {shown} (기본 그림·소리로 표시합니다)"
+                    ));
+                }
+                if ctx.media.pending() > 0 {
+                    macroquad::logging::warn!(
+                        "media: still loading after {}s, starting anyway",
+                        MEDIA_WAIT_SECONDS
+                    );
+                    ctx.toast("음악·그림을 아직 불러오는 중입니다. 게임은 계속 진행됩니다.");
                 }
                 self.progress = 1.0;
                 return Transition::Flow(Flow::Title);

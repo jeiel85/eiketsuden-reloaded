@@ -8,7 +8,7 @@ is developed (and how it differs from OpenRCT2's decompilation route) is in [ENG
 ┌──────────────────────────── hero-game (bin: eiketsuden) ────────────────────────────┐
 │ macroquad: window, input, audio, rendering (native Win/Linux/macOS + wasm32)        │
 │  app.rs ── screen flow driven by campaign nodes                                     │
-│  screens/ title · drama · camp (deploy/equip/shop/save) · battle · saveload · ending │
+│  screens/ title · drama · camp (deploy/equip/shop/save) · battle · saveload · controls · ending │
 │  ui/ widgets · gfx.rs virtual canvas · assets.rs · audio.rs · platform/ (storage)   │
 └───────────────▲─────────────────────────────────────────────────────────────────────┘
                 │ pure Rust API (no I/O)

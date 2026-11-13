@@ -1569,8 +1569,10 @@ impl BattleScreen {
         }
         self.map_input(ctx, dt);
 
-        // Everyone has acted: end the phase by itself.
-        if self.ui.mode == Mode::Browse
+        // Everyone has acted: end the phase by itself (unless the player turned that off in the
+        // settings, so they can look around the map first).
+        if ctx.settings.auto_end_turn
+            && self.ui.mode == Mode::Browse
             && self.state.phase == Side::Player
             && player::cycle_actor(&self.state, None, 1).is_none()
         {

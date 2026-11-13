@@ -1,6 +1,7 @@
-//! Settings overlay: volumes, text speed, battle animation speed, fullscreen (native), and the
-//! view-only choices beyond the original (`docs/DECISIONS.md` D25: portraits, danger range,
-//! battle presentation; D27: map and unit art), which all start at the original's look.
+//! Settings overlay: volumes, text speed, battle animation speed, fullscreen (native), the quick
+//! save slot, whether the player's phase ends by itself, and the view-only choices beyond the
+//! original (`docs/DECISIONS.md` D25: portraits, danger range, battle presentation; D27: map and
+//! unit art), which all start at the original's look.
 //!
 //! Values change with left/right, the ◀ ▶ arrows or confirm (steps forward) and apply
 //! immediately (the effect volume plays a sample); leaving the screen persists them through
@@ -31,6 +32,8 @@ enum Row {
     Art,
     DangerRange,
     BattleFx,
+    /// End the phase by itself once every unit has acted (see [`Settings::auto_end_turn`]).
+    AutoEndTurn,
     Defaults,
     Back,
 }
@@ -61,6 +64,7 @@ impl SettingsScreen {
             Row::Art,
             Row::DangerRange,
             Row::BattleFx,
+            Row::AutoEndTurn,
         ]);
         rows.push(Row::Defaults);
         rows.push(Row::Back);
@@ -120,6 +124,9 @@ impl SettingsScreen {
                 Row::BattleFx => MenuItem::new("전투 연출")
                     .detail(s.battle_fx.label())
                     .adjustable(),
+                Row::AutoEndTurn => MenuItem::new("턴 자동 종료")
+                    .detail(if s.auto_end_turn { "켬" } else { "끔" })
+                    .adjustable(),
                 Row::Defaults => MenuItem::new("기본값으로"),
                 Row::Back => MenuItem::new("돌아가기"),
             })
@@ -157,6 +164,7 @@ impl SettingsScreen {
             Row::Art => s.art = cycle(&ArtStyle::ALL, s.art, delta),
             Row::DangerRange => s.danger_range = !s.danger_range,
             Row::BattleFx => s.battle_fx = cycle(&BattleFx::ALL, s.battle_fx, delta),
+            Row::AutoEndTurn => s.auto_end_turn = !s.auto_end_turn,
             Row::Defaults | Row::Back => return,
         }
         ctx.audio.apply_settings(&ctx.settings);
@@ -208,11 +216,8 @@ impl Screen for SettingsScreen {
             }
             MenuEvent::Selected(i) => match self.rows[i] {
                 Row::Defaults => {
-                    ctx.settings = Settings {
-                        // Keep the window mode; resetting it unexpectedly is jarring.
-                        fullscreen: ctx.settings.fullscreen,
-                        ..Settings::default()
-                    };
+                    // Keeps the window mode and the original-mode folder (see the settings).
+                    ctx.settings.reset_to_defaults();
                     ctx.audio.apply_settings(&ctx.settings);
                     self.changed = true;
                     self.refresh(ctx);
@@ -257,26 +262,34 @@ impl Screen for SettingsScreen {
 /// Height of the storage location line at the bottom of the canvas.
 const STORAGE_LINE: f32 = 16.0;
 
+/// Space the window keeps above the first row for its heading, and below the last row.
+const HEADING: f32 = 24.0;
+const FOOTING: f32 = 6.0;
+
 /// The settings menu of `items` on a `canvas`: the window (menu plus its heading, see
-/// [`window_rect`]) centred in the space above the storage location line.
+/// [`window_rect`]) centred in the space above the storage location line. When the rows do not
+/// fit that space (a small canvas, or settings that grew), the list shows as many as fit and
+/// scrolls (arrows, wheel, drag — [`Menu`] handles it).
 fn placed(items: Vec<MenuItem>, canvas: Vec2) -> Menu {
+    let fits = canvas.y - STORAGE_LINE - HEADING - FOOTING;
+    let max_rows = (fits / theme::ROW_HEIGHT).floor().max(3.0) as usize;
     let mut menu = Menu::new(items);
     menu.framed = false;
-    let window_h = menu.rect().h + 32.0;
-    menu.set_position(
-        ((canvas.x - WIDTH) / 2.0).round() + 6.0,
-        ((canvas.y - STORAGE_LINE - window_h) / 2.0)
-            .round()
-            .max(0.0)
-            + 26.0,
-    );
+    if menu.items.len() > max_rows {
+        menu = menu.rows(max_rows);
+    }
+    let window_h = menu.rect().h + HEADING + FOOTING;
+    let top = ((canvas.y - STORAGE_LINE - window_h) / 2.0)
+        .round()
+        .max(0.0);
+    menu.set_position(((canvas.x - WIDTH) / 2.0).round() + 6.0, top + HEADING);
     menu.set_width(WIDTH - 12.0);
     menu
 }
 
 /// The window drawn around the settings menu `m`, with its heading.
 fn window_rect(m: Rect) -> Rect {
-    Rect::new(m.x - 6.0, m.y - 26.0, WIDTH, m.h + 32.0)
+    Rect::new(m.x - 6.0, m.y - HEADING, WIDTH, m.h + HEADING + FOOTING)
 }
 
 #[cfg(test)]
@@ -298,6 +311,25 @@ mod tests {
         assert!(window.y >= 0.0, "{window:?}");
         // The storage line takes the last 16 pixels.
         assert!(window.bottom() <= canvas.y - 16.0, "{window:?}");
+    }
+
+    /// On a canvas too short for every row the window stays inside it and the list scrolls
+    /// instead (the cursor row is always drawn).
+    #[test]
+    fn a_short_canvas_scrolls_the_list_instead_of_overflowing() {
+        let screen = SettingsScreen::new();
+        let canvas = Vec2::new(480.0, 200.0);
+        let mut menu = placed(screen.items(&Settings::default(), true, false), canvas);
+        let window = window_rect(menu.rect());
+        assert!(window.y >= 0.0, "{window:?}");
+        assert!(window.bottom() <= canvas.y - STORAGE_LINE, "{window:?}");
+        assert!(menu.visible_rows < menu.items.len(), "nothing to scroll");
+        menu.set_cursor(menu.items.len() - 1);
+        assert!(menu.cursor() >= menu.visible_rows);
+        assert!(
+            menu.row_rect(menu.cursor()).bottom() <= menu.rect().bottom() + 0.5,
+            "the cursor row is out of view"
+        );
     }
 
     /// The quick save slot row steps through the slots, wrapping.
@@ -362,5 +394,28 @@ mod tests {
         let pending = &screen.items(&s, true, true)[at];
         assert!(pending.adjustable);
         assert_eq!(pending.detail.as_deref(), Some("새 그림 · 맵은 재시작 후"));
+    }
+
+    /// The auto end turn row shows the setting and flips it (default: on, as before).
+    #[test]
+    fn the_auto_end_row_flips_the_setting() {
+        let screen = SettingsScreen::new();
+        let at = screen
+            .rows
+            .iter()
+            .position(|&r| r == Row::AutoEndTurn)
+            .unwrap();
+        let s = Settings::default();
+        assert!(s.auto_end_turn);
+        assert_eq!(
+            screen.items(&s, true, false)[at].detail.as_deref(),
+            Some("켬")
+        );
+        let mut flipped = s;
+        flipped.auto_end_turn = false;
+        assert_eq!(
+            screen.items(&flipped, true, false)[at].detail.as_deref(),
+            Some("끔")
+        );
     }
 }

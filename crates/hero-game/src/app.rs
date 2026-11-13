@@ -337,6 +337,19 @@ impl App {
     }
 
     fn global_keys(&mut self) {
+        // F1: the controls list over whatever is on screen (the game below keeps its state).
+        if is_key_pressed(crate::screens::controls::HELP_KEY)
+            && matches!(self.fade, Fade::Idle)
+            && !self.stack.last().is_some_and(|s| {
+                // Not over the loading screen (its update drives the pack load) nor on itself.
+                matches!(s.name(), "controls" | "loading")
+            })
+        {
+            self.ctx.input.consume();
+            self.handle(Transition::push(
+                crate::screens::controls::ControlsScreen::overlay(),
+            ));
+        }
         if is_key_pressed(KeyCode::F3) {
             self.show_fps = !self.show_fps;
         }

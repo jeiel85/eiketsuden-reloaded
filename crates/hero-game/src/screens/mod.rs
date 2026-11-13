@@ -4,6 +4,7 @@
 pub mod backdrop;
 pub mod battle;
 pub mod camp;
+pub mod controls;
 pub mod credits;
 pub mod drama;
 pub mod duel;

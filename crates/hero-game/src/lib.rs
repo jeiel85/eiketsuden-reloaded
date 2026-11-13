@@ -17,7 +17,7 @@
 //! | [`saves`] | save slots (autosave, quick save, manual) on top of the storage |
 //! | [`quicksave`] | quick save / load (F5 / F9) at any moment, incl. mid-scene and mid-battle |
 //! | [`settings`] | player settings persisted as JSON |
-//! | [`screens`] | loading, error, title, save/load, settings, credits, game over, UI gallery |
+//! | [`screens`] | loading, error, title, save/load, settings, controls, credits, game over, UI gallery |
 //! | [`secret`] | the original's hidden command ("금단의 비법", tapping the lord's portrait) |
 //!
 //! Start with the module docs of [`app`] (how to write a screen) and [`flow`] (where campaign
