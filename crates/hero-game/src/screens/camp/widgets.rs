@@ -97,9 +97,7 @@ pub fn draw_help_colored(ctx: &Ctx, text: &str, color: Color) {
         Color::new(0.0, 0.0, 0.05, 0.0),
         Color::new(0.0, 0.0, 0.05, 0.75),
     );
-    let fitted = truncate_to(text, back_button(canvas).x - 16.0, |c| {
-        gfx.char_width(c, FontId::Small, 1)
-    });
+    let fitted = gfx.elide(text, FontId::Small, 1, back_button(canvas).x - 16.0);
     gfx.text(
         &fitted,
         10.0,
@@ -144,27 +142,6 @@ pub fn draw_back_button(ctx: &Ctx) {
         Align::Center,
         TextStyle::small(color),
     );
-}
-
-/// `text` cut to `width` with a trailing `…` when it is wider.
-pub fn truncate_to(text: &str, width: f32, advance: impl Fn(char) -> f32) -> String {
-    let total: f32 = text.chars().map(&advance).sum();
-    if total <= width {
-        return text.to_string();
-    }
-    let budget = width - advance('…');
-    let mut used = 0.0;
-    let mut out = String::new();
-    for c in text.chars() {
-        used += advance(c);
-        if used > budget {
-            break;
-        }
-        out.push(c);
-    }
-    out.truncate(out.trim_end().len());
-    out.push('…');
-    out
 }
 
 /// Class display name.
@@ -677,15 +654,6 @@ mod tests {
         assert_eq!((list.w, list.h), (262.0, 432.0));
         assert_eq!(panel.right(), 632.0);
         assert!(panel.bottom() < help_y(vga.y) && back_button(vga).right() < vga.x);
-    }
-
-    #[test]
-    fn truncation() {
-        let w = |_c: char| 1.0;
-        assert_eq!(truncate_to("abc", 3.0, w), "abc");
-        assert_eq!(truncate_to("abcdef", 4.0, w), "abc…");
-        assert_eq!(truncate_to("ab cdef", 4.0, w), "ab…");
-        assert_eq!(truncate_to("", 0.0, w), "");
     }
 
     #[test]

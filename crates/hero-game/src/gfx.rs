@@ -521,6 +521,12 @@ impl Gfx {
     pub fn wrap(&self, text: &str, font: FontId, size: u8, max_width: f32) -> Vec<String> {
         wrap_text(text, max_width, |c| self.char_width(c, font, size))
     }
+
+    /// `text` cut to `max_width` virtual pixels with a trailing `…` when it is wider (see
+    /// [`elide_text`]).
+    pub fn elide(&self, text: &str, font: FontId, size: u8, max_width: f32) -> String {
+        elide_text(text, max_width, |c| self.char_width(c, font, size))
+    }
 }
 
 impl Default for Gfx {
@@ -583,6 +589,29 @@ pub fn is_cjk(c: char) -> bool {
 
 fn can_break_between(prev: char, next: char) -> bool {
     !no_break_before(next) && !no_break_after(prev) && (is_cjk(prev) || is_cjk(next))
+}
+
+/// `text` cut to `max_width` pixels with a trailing `…` when it is wider, trimmed at the end so a
+/// cut that lands after a space does not leave a gap before the `…`. `advance` returns the width
+/// of one character.
+pub fn elide_text(text: &str, max_width: f32, mut advance: impl FnMut(char) -> f32) -> String {
+    let total: f32 = text.chars().map(&mut advance).sum();
+    if total <= max_width {
+        return text.to_string();
+    }
+    let budget = max_width - advance('…');
+    let mut used = 0.0;
+    let mut out = String::new();
+    for c in text.chars() {
+        used += advance(c);
+        if used > budget {
+            break;
+        }
+        out.push(c);
+    }
+    out.truncate(out.trim_end().len());
+    out.push('…');
+    out
 }
 
 /// Word wrap for Korean (and mixed Latin/Hanja) text.
@@ -921,6 +950,16 @@ mod tests {
             wrap_mono("어지러운 세상이로구나 백성을", 20.0),
             vec!["어지러운", "세상이로구나 백성을"]
         );
+    }
+
+    #[test]
+    fn elides_text_to_a_width() {
+        let w = |_c: char| 1.0;
+        assert_eq!(elide_text("abc", 3.0, w), "abc");
+        assert_eq!(elide_text("abcdef", 4.0, w), "abc…");
+        // A cut that lands after a space does not leave a gap before the ellipsis.
+        assert_eq!(elide_text("ab cdef", 4.0, w), "ab…");
+        assert_eq!(elide_text("", 0.0, w), "");
     }
 
     #[test]

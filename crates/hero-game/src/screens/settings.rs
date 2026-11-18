@@ -6,6 +6,9 @@
 //! Values change with left/right, the ◀ ▶ arrows or confirm (steps forward) and apply
 //! immediately (the effect volume plays a sample); leaving the screen persists them through
 //! the storage layer.
+//!
+//! A row explains itself when the pointer rests on it ([`crate::ui::tooltip`]): the label fits on
+//! the row, the meaning of the setting does not.
 
 use crate::app::{Ctx, Screen, Transition};
 use crate::audio::sfx;
@@ -14,6 +17,7 @@ use crate::settings::{cycle, ArtStyle, BattleFx, BattleSpeed, PortraitStyle, Set
 use crate::ui::format;
 use crate::ui::menu::{Menu, MenuEvent, MenuItem};
 use crate::ui::theme;
+use crate::ui::tooltip::{draw_tooltip, HoverTimer};
 use crate::ui::window::draw_window;
 use macroquad::prelude::*;
 
@@ -40,10 +44,41 @@ enum Row {
 
 const WIDTH: f32 = 260.0;
 
+impl Row {
+    /// What the row changes, for its tooltip. `None` for 돌아가기, whose label says everything
+    /// there is to know.
+    fn explain(self) -> Option<&'static str> {
+        match self {
+            Row::Master => Some("모든 소리를 한 번에 조절합니다."),
+            Row::Bgm => Some("배경 음악의 음량입니다."),
+            Row::Sfx => Some("효과음의 음량입니다. 바꾸면 미리 들려 줍니다."),
+            Row::TextSpeed => Some("대사가 한 글자씩 나타나는 속도입니다."),
+            Row::BattleSpeed => Some("부대 이동·공격 연출이 재생되는 속도입니다."),
+            Row::Fullscreen => Some("창을 화면 가득 채웁니다. Alt+Enter·F11로도 바꿀 수 있습니다."),
+            Row::QuickSlot => {
+                Some("F5·F9와 메뉴의 순간 저장이 쓰는 칸입니다. F6으로도 바꿀 수 있습니다.")
+            }
+            Row::Portraits => Some("대사창의 얼굴을 원작의 것과 공개 초상화 중에서 고릅니다."),
+            Row::Art => Some("전투 지도와 부대 그림을 원작의 것과 새 그림 중에서 고릅니다."),
+            Row::DangerRange => {
+                Some("아군 차례에 적이 다음 차례에 닿는 칸을 표시합니다 (원작에 없는 표시).")
+            }
+            Row::BattleFx => Some("타격에 숫자 피해량과 흔들림을 더합니다."),
+            Row::AutoEndTurn => Some(
+                "끄면 부대가 모두 행동해도 '턴 종료'를 누를 때까지 기다립니다. 켜면 원작처럼 저절로 넘어갑니다.",
+            ),
+            Row::Defaults => Some("음량·화면 표시를 기본값으로 되돌립니다. 창 모드와 원작 폴더는 그대로 둡니다."),
+            Row::Back => None,
+        }
+    }
+}
+
 pub struct SettingsScreen {
     rows: Vec<Row>,
     menu: Menu,
     changed: bool,
+    /// Which row the pointer has rested on, for its explanation.
+    hover: HoverTimer,
 }
 
 impl SettingsScreen {
@@ -72,6 +107,7 @@ impl SettingsScreen {
             rows,
             menu: Menu::new(Vec::new()),
             changed: false,
+            hover: HoverTimer::default(),
         }
     }
 
@@ -206,9 +242,17 @@ impl Screen for SettingsScreen {
             ctx.remake_maps_missing,
         );
         self.menu = placed(items, ctx.gfx.size());
+        self.hover = HoverTimer::default();
     }
 
     fn update(&mut self, ctx: &mut Ctx) -> Transition {
+        // Which row the pointer rests on, for its explanation (drawn by `draw`).
+        let row = ctx
+            .input
+            .pointer()
+            .and_then(|p| self.menu.row_at(p))
+            .map(|i| i as u64);
+        self.hover.update(row, ctx.dt);
         match self.menu.update(ctx) {
             MenuEvent::Adjust(i, d) => {
                 let row = self.rows[i];
@@ -256,6 +300,14 @@ impl Screen for SettingsScreen {
             canvas.y - 4.0 - 12.0 * lines.len() as f32,
             TextStyle::small(theme::TEXT_DISABLED),
         );
+        // The explanation of the row under the pointer, once it has rested there.
+        if self.hover.visible() {
+            if let (Some(i), Some(p)) = (self.hover.target(), ctx.input.pointer()) {
+                if let Some(why) = self.rows.get(i as usize).and_then(|r| r.explain()) {
+                    draw_tooltip(&ctx.gfx, why, p);
+                }
+            }
+        }
     }
 }
 
@@ -394,6 +446,30 @@ mod tests {
         let pending = &screen.items(&s, true, true)[at];
         assert!(pending.adjustable);
         assert_eq!(pending.detail.as_deref(), Some("새 그림 · 맵은 재시작 후"));
+    }
+
+    /// Every setting row explains itself (the tooltip text is not empty and stays short enough
+    /// for the tooltip box), and the rows whose label says it all have none. The explanation
+    /// exists for every row of the screen, so a new row cannot be added without one.
+    #[test]
+    fn every_row_explains_itself() {
+        let screen = SettingsScreen::new();
+        let mut action_rows = 0;
+        for row in &screen.rows {
+            match row.explain() {
+                Some(why) => {
+                    assert!(!why.is_empty(), "{row:?} has an empty explanation");
+                    // The tooltip wraps at 180 pixels of the small font: about 30 characters a
+                    // line, and four lines still fit above the message box.
+                    assert!(why.chars().count() <= 120, "{row:?}: {why}");
+                }
+                None => action_rows += 1,
+            }
+        }
+        // Only 돌아가기 does not explain itself.
+        assert_eq!(action_rows, 1, "a setting row lost its explanation");
+        assert!(Row::Defaults.explain().is_some());
+        assert_eq!(Row::Back.explain(), None);
     }
 
     /// The auto end turn row shows the setting and flips it (default: on, as before).
