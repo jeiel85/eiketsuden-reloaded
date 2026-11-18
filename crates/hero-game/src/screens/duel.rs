@@ -15,7 +15,7 @@
 use crate::app::Ctx;
 use crate::assets::AssetState;
 use crate::audio::sfx;
-use crate::gfx::{fill_rect, Align, TextStyle};
+use crate::gfx::{fill_rect, Align, FontId, TextStyle};
 use crate::ui::theme;
 use crate::ui::window::{draw_window_ex, WindowStyle};
 use hero_core::script::{DuelAct, DuelSide, DUEL_TERRAIN};
@@ -328,14 +328,10 @@ impl DuelView {
                 continue;
             }
             draw_window_ex(r, WindowStyle::Panel, 0.85);
-            gfx.text_aligned(
-                fighter_name(ctx, f),
-                r.x,
-                r.y + 2.0,
-                r.w,
-                Align::Center,
-                small,
-            );
+            // A pack may name an officer longer than the window: a cut name still identifies the
+            // fighter better than one spilling over the stage.
+            let name = gfx.elide(fighter_name(ctx, f), FontId::Small, 1, r.w - 2.0 * NAME_PAD);
+            gfx.text_aligned(&name, r.x, r.y + 2.0, r.w, Align::Center, small);
         }
     }
 }
@@ -361,6 +357,8 @@ const NAME_H: f32 = 14.0;
 const NAME_MARGIN: f32 = 4.0;
 /// Narrowest a name window gets, so a one-character name still reads as a window.
 const NAME_MIN_W: f32 = 24.0;
+/// Room left inside a name window on each side of the text.
+const NAME_PAD: f32 = 3.0;
 
 /// The name windows of the two fighters on `stage`: the left one along the left edge and the
 /// right one along the right edge, both at the top (the sky band the riders do not reach).
