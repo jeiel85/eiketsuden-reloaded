@@ -7,11 +7,17 @@
 //! The sheet is `gfx/duel/<officer>.png` for the officer, else `gfx/duel/left.png` /
 //! `right.png` for the side.
 //! Without a sheet the fighter is not drawn (the scene still runs its timing).
+//!
+//! Each fighter's name is shown over their side of the stage ([`name_rects`]), so a player who
+//! does not recognise the two sheets still knows who is fighting; an officer the pack does not
+//! know (a scene naming someone outside `officers/`) shows the id the scene gave.
 
 use crate::app::Ctx;
 use crate::assets::AssetState;
 use crate::audio::sfx;
-use crate::gfx::fill_rect;
+use crate::gfx::{fill_rect, Align, TextStyle};
+use crate::ui::theme;
+use crate::ui::window::{draw_window_ex, WindowStyle};
 use hero_core::script::{DuelAct, DuelSide, DUEL_TERRAIN};
 use macroquad::prelude::*;
 use std::collections::BTreeMap;
@@ -304,13 +310,69 @@ impl DuelView {
                 },
             );
         }
+        self.draw_names(ctx, stage);
     }
+
+    /// Draw each fighter's name in a small window at the top of their half of `stage`.
+    ///
+    /// Why the name is not left to the sheet: the art says nothing about who the rider is, and a
+    /// duel is often the first time an officer appears. The windows sit on the sky band (the
+    /// riders start at [`ROW`]), so they cover no fighting. A fighter who has left the stage
+    /// takes their name with them.
+    fn draw_names(&self, ctx: &Ctx, stage: Rect) {
+        let gfx = &ctx.gfx;
+        let small = TextStyle::small(theme::TEXT).shadow(theme::TEXT_SHADOW);
+        for (i, r) in name_rects(stage).into_iter().enumerate() {
+            let f = &self.fighters[i];
+            if f.gone {
+                continue;
+            }
+            draw_window_ex(r, WindowStyle::Panel, 0.85);
+            gfx.text_aligned(
+                fighter_name(ctx, f),
+                r.x,
+                r.y + 2.0,
+                r.w,
+                Align::Center,
+                small,
+            );
+        }
+    }
+}
+
+/// The name to show for `f`: the pack's officer name, else the id the scene gave (a duel may
+/// name someone outside the pack's officers).
+fn fighter_name<'a>(ctx: &'a Ctx, f: &'a Fighter) -> &'a str {
+    ctx.pack
+        .as_deref()
+        .and_then(|p| p.officer(&f.officer))
+        .map_or(f.officer.as_str(), |o| o.name.as_str())
 }
 
 /// Whether a rider at `x` is entirely off the stage (a frame reaches 2 cells left and 4 right
 /// of its cell).
 fn off_stage(x: i32) -> bool {
     x + 4 <= 0 || x - 2 >= STAGE_CELLS
+}
+
+/// Height of the name windows over the stage.
+const NAME_H: f32 = 14.0;
+/// Gap between a name window and the stage's edge.
+const NAME_MARGIN: f32 = 4.0;
+/// Narrowest a name window gets, so a one-character name still reads as a window.
+const NAME_MIN_W: f32 = 24.0;
+
+/// The name windows of the two fighters on `stage`: the left one along the left edge and the
+/// right one along the right edge, both at the top (the sky band the riders do not reach).
+fn name_rects(stage: Rect) -> [Rect; 2] {
+    let y = stage.y + NAME_MARGIN;
+    // A quarter of the stage each: enough for a three-character name at 1:1, and they never meet
+    // on the narrowest stage.
+    let w = (stage.w / 4.0).max(NAME_MIN_W).round();
+    [
+        Rect::new(stage.x + NAME_MARGIN, y, w, NAME_H),
+        Rect::new(stage.right() - NAME_MARGIN - w, y, w, NAME_H),
+    ]
 }
 
 /// Width of the stage in stage pixels.
@@ -371,6 +433,31 @@ mod tests {
 
     fn xs(v: &DuelView) -> [i32; 2] {
         [v.fighters[0].x, v.fighters[1].x]
+    }
+
+    /// The name windows stay on the stage, over its sky band, and never meet each other — on the
+    /// smallest stage (1:1) and on a large one.
+    #[test]
+    fn the_name_windows_stay_on_the_stage_and_apart() {
+        for area in [
+            Rect::new(16.0, 32.0, 416.0, 352.0),
+            Rect::new(0.0, 0.0, 1280.0, 600.0),
+            Rect::new(0.0, 0.0, 208.0, 400.0),
+        ] {
+            let stage = stage_rect(area);
+            let [left, right] = name_rects(stage);
+            for r in [left, right] {
+                assert!(
+                    r.x >= stage.x && r.right() <= stage.right(),
+                    "{r:?} {stage:?}"
+                );
+                assert!(r.y >= stage.y && r.bottom() <= stage.bottom(), "{r:?}");
+                // Above the riders: they start at ROW cells from the top.
+                assert!(r.bottom() <= stage.y + ROW * CELL * (stage.w / STAGE_W));
+            }
+            assert!(left.right() < right.x, "{left:?} {right:?}");
+            assert_eq!(left.y, right.y);
+        }
     }
 
     #[test]
