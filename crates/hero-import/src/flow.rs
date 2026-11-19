@@ -562,4 +562,36 @@ mod tests {
             "{t}"
         );
     }
+
+    /// A setup that loads its map with `battle_end` to it (SNR4's last two battles) is a battle,
+    /// the map is named once even when `load_map` names it too, and only the setup group's
+    /// `battle_end` counts as a load.
+    #[test]
+    fn a_setup_battle_end_loads_its_map_once() {
+        let file = ScenarioFile::for_test(vec![vec![
+            // The setup: `load_map` and the `battle_end` both name battle map 0x3010.
+            record(
+                0,
+                0,
+                0,
+                vec![
+                    instr("battle_roster", &[]),
+                    instr("load_map", &[("map", 0x3010)]),
+                    instr("battle_end", &[("next_map", 0x3010)]),
+                ],
+            ),
+            record(1, 0, 1, vec![instr("begin_battle", &[])]),
+        ]]);
+        let s = chapter_flow(&file, Detail::Structure);
+        assert!(s.contains("- **블록 0**: 전투;"), "{s}");
+        assert_eq!(s.matches("전투 맵 16").count(), 1, "{s}");
+
+        // A phase's `battle_end` to another battle map is not a map load.
+        let file = ScenarioFile::for_test(vec![vec![
+            record(0, 0, 0, vec![instr("begin_battle", &[])]),
+            record(1, 0, 3, vec![instr("battle_end", &[("next_map", 0x3011)])]),
+        ]]);
+        let s = chapter_flow(&file, Detail::Structure);
+        assert!(!s.contains("전투 맵 17"), "{s}");
+    }
 }

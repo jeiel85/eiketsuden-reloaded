@@ -525,7 +525,13 @@ impl Gfx {
     /// `text` cut to `max_width` virtual pixels with a trailing `…` when it is wider (see
     /// [`elide_text`]).
     pub fn elide(&self, text: &str, font: FontId, size: u8, max_width: f32) -> String {
-        elide_text(text, max_width, |c| self.char_width(c, font, size))
+        elide_text(text, max_width, |s| self.text_width(s, font, size))
+    }
+
+    /// `text` cut to `max_width` virtual pixels with a `…` in the middle when it is wider, so the
+    /// two ends that tell similar names apart stay readable (see [`elide_middle_text`]).
+    pub fn elide_middle(&self, text: &str, font: FontId, size: u8, max_width: f32) -> String {
+        elide_middle_text(text, max_width, |s| self.text_width(s, font, size))
     }
 }
 
@@ -591,26 +597,122 @@ fn can_break_between(prev: char, next: char) -> bool {
     !no_break_before(next) && !no_break_after(prev) && (is_cjk(prev) || is_cjk(next))
 }
 
+/// Characters that extend the character before them instead of standing on their own: combining
+/// accent marks and the medial/final jamo of decomposed (NFD) Hangul. A cut between a base
+/// character and its marks would leave a stray mark at the start of the next part.
+pub fn is_combining(c: char) -> bool {
+    matches!(c as u32,
+        0x0300..=0x036F       // combining diacritical marks
+        | 0x0483..=0x0489
+        | 0x0591..=0x05BD
+        | 0x05BF | 0x05C1..=0x05C2 | 0x05C4..=0x05C5 | 0x05C7
+        | 0x0610..=0x061A
+        | 0x064B..=0x065F | 0x0670
+        | 0x06D6..=0x06DC | 0x06DF..=0x06E4 | 0x06E7..=0x06E8 | 0x06EA..=0x06ED
+        | 0x0711 | 0x0730..=0x074A
+        | 0x07A6..=0x07B0
+        | 0x0900..=0x0903 | 0x093A..=0x094F | 0x0951..=0x0957 | 0x0962..=0x0963
+        | 0x0981..=0x0983 | 0x09BC | 0x09BE..=0x09CD
+        | 0x0A01..=0x0A03 | 0x0A3C | 0x0A3E..=0x0A4D
+        | 0x0A81..=0x0A83 | 0x0ABC | 0x0ABE..=0x0ACD
+        | 0x0B01..=0x0B03 | 0x0B3C | 0x0B3E..=0x0B4D
+        | 0x0C00..=0x0C04 | 0x0C3E..=0x0C56
+        | 0x0D00..=0x0D03 | 0x0D3B..=0x0D4D
+        | 0x0E31 | 0x0E34..=0x0E3A | 0x0E47..=0x0E4E
+        | 0x0EB1 | 0x0EB4..=0x0EBC | 0x0EC8..=0x0ECD
+        | 0x0F18..=0x0F19 | 0x0F35 | 0x0F37 | 0x0F39 | 0x0F71..=0x0F84
+        | 0x102B..=0x103E
+        | 0x1160..=0x11FF     // Hangul Jungseong/Jongseong
+        | 0x135D..=0x135F
+        | 0x1712..=0x1714 | 0x1732..=0x1734
+        | 0x1A17..=0x1A1B | 0x1AB0..=0x1AFF
+        | 0x1B00..=0x1B04 | 0x1B34..=0x1B44
+        | 0x1DC0..=0x1DFF     // combining diacritical marks supplement
+        | 0x20D0..=0x20F0     // combining diacritical marks for symbols
+        | 0x2CEF..=0x2CF1
+        | 0x302A..=0x302F | 0x3099..=0x309A
+        | 0xA66F..=0xA672 | 0xA674..=0xA67D | 0xA69E..=0xA69F
+        | 0xA6F0..=0xA6F1
+        | 0xFE00..=0xFE0F     // variation selectors
+        | 0xFE20..=0xFE2F     // combining half marks
+        | 0x101FD | 0x10A01..=0x10A0F | 0x10A38..=0x10A3F
+        | 0x11000..=0x11002 | 0x11038..=0x11046
+        | 0x1D165..=0x1D169 | 0x1D16D..=0x1D182
+        | 0x1D1AA..=0x1D1AD
+    )
+}
+
+/// The character [`elide_text`] and [`elide_middle_text`] put where they cut.
+pub const ELLIPSIS: char = '…';
+
+/// Byte offsets in `text` where a cut leaves whole characters: at the start and the end of the
+/// text, and before every character that is not a combining mark.
+fn cut_points(text: &str) -> Vec<usize> {
+    let mut cuts: Vec<usize> = text
+        .char_indices()
+        .filter(|&(i, c)| i == 0 || !is_combining(c))
+        .map(|(i, _)| i)
+        .collect();
+    cuts.push(text.len());
+    cuts
+}
+
 /// `text` cut to `max_width` pixels with a trailing `…` when it is wider, trimmed at the end so a
-/// cut that lands after a space does not leave a gap before the `…`. `advance` returns the width
-/// of one character.
-pub fn elide_text(text: &str, max_width: f32, mut advance: impl FnMut(char) -> f32) -> String {
-    let total: f32 = text.chars().map(&mut advance).sum();
-    if total <= max_width {
+/// cut that lands after a space does not leave a gap before the `…`.
+///
+/// `width` measures a whole slice, so the kerning between neighbouring characters counts as it
+/// does when the text is drawn, and the cut never lands inside a character with combining marks
+/// (the front part keeps them, the rest is dropped).
+pub fn elide_text(text: &str, max_width: f32, mut width: impl FnMut(&str) -> f32) -> String {
+    if width(text) <= max_width {
         return text.to_string();
     }
-    let budget = max_width - advance('…');
-    let mut used = 0.0;
-    let mut out = String::new();
-    for c in text.chars() {
-        used += advance(c);
-        if used > budget {
+    let ellipsis = ELLIPSIS.to_string();
+    let budget = max_width - width(&ellipsis);
+    let mut end = 0;
+    for &cut in cut_points(text).iter().skip(1) {
+        if width(&text[..cut]) > budget {
             break;
         }
-        out.push(c);
+        end = cut;
     }
-    out.truncate(out.trim_end().len());
-    out.push('…');
+    let mut out = text[..end].trim_end().to_string();
+    out.push(ELLIPSIS);
+    out
+}
+
+/// `text` cut to `max_width` pixels with a `…` in the middle when it is wider: the front and the
+/// back are kept, so two long names that differ only at their ends still read apart. Half the
+/// room goes to the front, the rest to as much of the back as fits.
+pub fn elide_middle_text(text: &str, max_width: f32, mut width: impl FnMut(&str) -> f32) -> String {
+    if width(text) <= max_width {
+        return text.to_string();
+    }
+    let ellipsis = ELLIPSIS.to_string();
+    let budget = max_width - width(&ellipsis);
+    if budget <= 0.0 {
+        return ellipsis;
+    }
+    let cuts = cut_points(text);
+    let mut front = 0;
+    for &cut in cuts.iter().skip(1) {
+        if cut == text.len() || width(&text[..cut]) > budget / 2.0 {
+            break;
+        }
+        front = cut;
+    }
+    let room = budget - width(&text[..front]);
+    // The widest suffix that still fits: a shorter one only gets wider (kerning aside).
+    let mut back = text.len();
+    for &cut in cuts.iter().rev() {
+        if cut < front || width(&text[cut..]) > room {
+            break;
+        }
+        back = cut;
+    }
+    let mut out = text[..front].trim_end().to_string();
+    out.push(ELLIPSIS);
+    out.push_str(text[back..].trim_start());
     out
 }
 
@@ -954,12 +1056,56 @@ mod tests {
 
     #[test]
     fn elides_text_to_a_width() {
-        let w = |_c: char| 1.0;
+        let w = |s: &str| s.chars().count() as f32;
         assert_eq!(elide_text("abc", 3.0, w), "abc");
         assert_eq!(elide_text("abcdef", 4.0, w), "abc…");
         // A cut that lands after a space does not leave a gap before the ellipsis.
         assert_eq!(elide_text("ab cdef", 4.0, w), "ab…");
         assert_eq!(elide_text("", 0.0, w), "");
+        // The ellipsis itself takes room: a budget that leaves none cuts everything.
+        assert_eq!(elide_text("abc", 0.5, w), "…");
+    }
+
+    /// Kerning: the widths are measured on whole slices, so characters that draw narrower
+    /// together are not cut early. This font charges 0.5 less for the "fi" pair.
+    #[test]
+    fn eliding_measures_whole_slices() {
+        let w = |s: &str| s.chars().count() as f32 - 0.5 * s.matches("fi").count() as f32;
+        // "fiX" draws 2.5 pixels wide, so it fits where one-by-one sums say 3.
+        assert_eq!(elide_text("fiX", 2.6, w), "fiX");
+        assert_eq!(elide_text("fiXYZ", 4.2, w), "fiX…");
+    }
+
+    /// A cut never lands between a base character and its combining marks (NFD Hangul here), so
+    /// no stray jamo is left at the start of the next part.
+    #[test]
+    fn eliding_keeps_combining_marks_with_their_base() {
+        let w = |s: &str| s.chars().count() as f32;
+        // U+1100 U+1161 (decomposed 가) then U+1102 U+1161 (나).
+        let text = "\u{1100}\u{1161}\u{1102}\u{1161}";
+        // Room for the first syllable plus the ellipsis, none for the second's base.
+        assert_eq!(elide_text(text, 3.0, w), "\u{1100}\u{1161}…");
+        assert!(is_combining('\u{1161}') && !is_combining('\u{1100}'));
+    }
+
+    #[test]
+    fn the_middle_elide_keeps_both_ends() {
+        let w = |s: &str| s.chars().count() as f32;
+        assert_eq!(elide_middle_text("abc", 3.0, w), "abc");
+        // The front gets half the room, the back as much as fits; the whole stays within the
+        // width it was given.
+        assert_eq!(
+            elide_middle_text("guan_yu_the_elder", 10.0, w),
+            "guan…elder"
+        );
+        assert_eq!(elide_middle_text("abcdefg", 6.0, w), "ab…efg");
+        // Names that differ at the front and the back stay apart, unlike a tail-only cut.
+        assert_ne!(
+            elide_middle_text("older_zhang_fei", 8.0, w),
+            elide_middle_text("younger_zhang_yun", 8.0, w)
+        );
+        assert_eq!(elide_middle_text("abc defgh ijk", 8.0, w), "abc…ijk");
+        assert_eq!(elide_middle_text("abc", 0.5, w), "…");
     }
 
     #[test]

@@ -1,6 +1,8 @@
 //! `hero-tools simulate --campaign`: plays the whole campaign from a new game, AI against AI,
 //! the way the game's flow does (`hero-game` `flow.rs`), so each battle is fought with the army
 //! the earlier ones left: levels, classes, recruits, items and flags carry over.
+//! `--from NODE` starts at that node instead, with the officers the battles from there on need
+//! ([`officers_ahead`]) at their starting levels.
 //!
 //! * **Drama** nodes, the scenes battles play (intro, events, outro) and an ending's scene run
 //!   headless ([`DramaRunner`]) with their side effects: flags, gold, items, officers joining
@@ -107,7 +109,17 @@ pub fn run(dir: &Path, seeds: u32, choices: &Choices, options: &Options) -> Resu
             )));
         }
     }
+    if let Some(from) = &options.from {
+        if pack.campaign.node(from).is_none() {
+            return Err(Failure::Usage(format!(
+                "--from names unknown campaign node `{from}`"
+            )));
+        }
+    }
     print!("Simulating the campaign x {seeds} seed(s), at most {MAX_PHASES} phases per battle");
+    if let Some(from) = &options.from {
+        print!(", from node `{from}`");
+    }
     if options.level_bonus > 0 {
         print!(
             ", every army officer {} level(s) up before their first battle",
@@ -128,9 +140,56 @@ pub fn run(dir: &Path, seeds: u32, choices: &Choices, options: &Options) -> Resu
     Ok(!failed)
 }
 
-/// `--level-bonus`, `--trace`, `--difficulty` and `--extended-rules`.
+/// The officers the campaign needs from `start` on: every officer the battles from there on
+/// deploy or name ([`crate::simulate::player_needs`]), so a `--from` run fights with the army the
+/// story would have given it, at the starting levels `officers.toml` has for them (the levels the
+/// battles before `start` would have earned are what `--level-bonus` stands in for).
+fn officers_ahead(pack: &Pack, start: &str) -> Vec<Id> {
+    let mut out: Vec<Id> = Vec::new();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut todo: Vec<&str> = vec![start];
+    while let Some(id) = todo.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        match pack.campaign.node(id) {
+            Some(Node::Drama { next, .. }) | Some(Node::Camp { next, .. }) => {
+                todo.push(next.as_str())
+            }
+            Some(Node::Battle { battle, next, .. }) => {
+                if let Some(def) = pack.battles.get(battle) {
+                    let needed = def
+                        .deploy
+                        .required
+                        .iter()
+                        .cloned()
+                        .chain(crate::simulate::player_needs(pack, def));
+                    for officer in needed {
+                        if !out.contains(&officer) {
+                            out.push(officer);
+                        }
+                    }
+                }
+                todo.push(next.as_str());
+            }
+            // Either arm may be taken; a node both arms reach is visited once.
+            Some(Node::Branch {
+                then, otherwise, ..
+            }) => {
+                todo.push(then.as_str());
+                todo.push(otherwise.as_str());
+            }
+            Some(Node::Ending { .. }) | None => {}
+        }
+    }
+    out
+}
+
+/// `--from`, `--level-bonus`, `--trace`, `--difficulty` and `--extended-rules`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Options {
+    /// The campaign node the runs start at instead of a new game's first node.
+    pub from: Option<String>,
     /// Levels every army officer gets once, before their first battle.
     pub level_bonus: u32,
     /// A battle whose every phase is written to stderr ([`trace_line`]).
@@ -140,11 +199,21 @@ pub struct Options {
 }
 
 impl Options {
-    /// A new game of `pack` with these choices, as the title's new game starts one.
-    fn new_game(&self, pack: &Pack) -> CampaignState {
+    /// The campaign state the runs start from: a new game with these choices, as the title's
+    /// new game starts one, or — with `--from` — that game moved to the named node and given
+    /// the officers the battles from there on deploy ([`officers_ahead`]).
+    fn start(&self, pack: &Pack) -> Result<CampaignState, String> {
         let mut campaign = CampaignState::new_game(pack);
         campaign.apply_options(self.game);
-        campaign
+        if let Some(from) = &self.from {
+            campaign
+                .jump(pack, from)
+                .map_err(|e| format!("--from `{from}`: {e}"))?;
+            for officer in officers_ahead(pack, &campaign.node) {
+                campaign.join(pack, &officer).map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(campaign)
     }
 
     /// The new game's choices that are on, for the report header.
@@ -201,7 +270,10 @@ impl Sim<'_> {
 
     fn play(&mut self) -> End {
         let pack = self.pack;
-        let mut campaign = self.options.new_game(pack);
+        let mut campaign = match self.options.start(pack) {
+            Ok(campaign) => campaign,
+            Err(e) => return End::Error(e),
+        };
         for _ in 0..MAX_NODES {
             let Some(node) = pack.campaign.node(&campaign.node).cloned() else {
                 return End::Error(format!("unknown node `{}`", campaign.node));
@@ -777,9 +849,48 @@ mod tests {
     }
 
     #[test]
+    fn a_run_can_start_mid_campaign() {
+        let pack = fixture();
+        // From camp2 on, the campaign has b02, which needs jian_yong (an `oath` recruit a new
+        // game does not start with) and reaches the ending.
+        let from = Options {
+            from: Some("camp2".into()),
+            ..Options::default()
+        };
+        let run = run_seed(&pack, 1, &Choices::new(), &from);
+        assert_eq!(run.end, End::Ending("finale".into()), "{run:?}");
+        let battles: Vec<&str> = run.fought.iter().map(|f| f.battle.as_str()).collect();
+        assert_eq!(battles, ["b02"], "the battles before camp2 are not fought");
+        let army = from.start(&pack).unwrap();
+        assert_eq!(army.node, "camp2");
+        assert!(
+            army.officer("jian_yong").is_some(),
+            "the officers the battles ahead need join the army"
+        );
+        // An unknown node is an error, not a new game from the start.
+        let bad = Options {
+            from: Some("no_such_node".into()),
+            ..Options::default()
+        };
+        assert!(bad.start(&pack).unwrap_err().contains("no_such_node"));
+        // Starting at a battle node fights it and what follows.
+        let run = run_seed(
+            &pack,
+            1,
+            &Choices::new(),
+            &Options {
+                from: Some("battle1".into()),
+                ..Options::default()
+            },
+        );
+        let battles: Vec<&str> = run.fought.iter().map(|f| f.battle.as_str()).collect();
+        assert_eq!(battles, ["b01", "b02"], "{run:?}");
+    }
+
+    #[test]
     fn the_runs_start_with_the_new_game_choices() {
         let pack = fixture();
-        assert!(!Options::default().new_game(&pack).off_original());
+        assert!(!Options::default().start(&pack).unwrap().off_original());
         assert!(Options::default().game_tags().is_empty());
         let hard = Options {
             game: GameOptions {
@@ -789,7 +900,7 @@ mod tests {
             },
             ..Options::default()
         };
-        let campaign = hard.new_game(&pack);
+        let campaign = hard.start(&pack).unwrap();
         assert_eq!(campaign.difficulty, Difficulty::Hard);
         assert!(campaign.extended_rules);
         assert_eq!(hard.game_tags(), ["hard difficulty", "extended rules"]);
@@ -804,7 +915,7 @@ mod tests {
                 .map(|u| u.level as i32)
                 .collect()
         };
-        let normal = level(&Options::default().new_game(&pack));
+        let normal = level(&Options::default().start(&pack).unwrap());
         assert!(!normal.is_empty());
         let offset = Difficulty::Hard.enemy_level_offset();
         let cap = pack.rules.level_cap as i32;

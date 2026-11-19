@@ -8,10 +8,26 @@ use super::storage::{validate_key, KeyValueStore, StorageError};
 use sapp_jsutils::JsObject;
 
 /// Version of the `hero_web` JS plugin this build expects.
-pub const HERO_WEB_VERSION: u32 = 4;
+pub const HERO_WEB_VERSION: u32 = 5;
 
-/// Prefix of every `localStorage` item written by the game.
-const KEY_PREFIX: &str = "eiketsuden.";
+/// Where an async clipboard request of `web/hero_web.js` stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardState {
+    /// The request was made and has not answered yet.
+    Running,
+    /// The text was copied.
+    Copied,
+    /// The browser refused the copy.
+    CopyFailed,
+    /// The clipboard's text is in [`clipboard_text`].
+    Pasted,
+    /// The clipboard held no text (or only blank text).
+    Empty,
+    /// The browser refused the read.
+    PasteFailed,
+    /// There is no request at all (the page has no clipboard API to ask).
+    NoRequest,
+}
 
 // Imported from the `env` module that the miniquad loader fills from registered plugins.
 #[link(wasm_import_module = "env")]
@@ -25,7 +41,16 @@ extern "C" {
     fn hero_now_seconds() -> f64;
     fn hero_location_hash() -> JsObject;
     fn hero_pointer_inside() -> i32;
+    fn hero_clipboard_copy(text: JsObject);
+    fn hero_clipboard_paste();
+    /// 0 while the request runs, 1 copied, 2 copy refused, 3 pasted, 4 empty, 5 paste refused.
+    fn hero_clipboard_state() -> i32;
+    fn hero_clipboard_text() -> JsObject;
+    fn hero_clipboard_reset();
 }
+
+/// Prefix of every `localStorage` item written by the game.
+const KEY_PREFIX: &str = "eiketsuden.";
 
 /// Checked by the miniquad JS loader against the plugin's `version` field.
 #[no_mangle]
@@ -57,6 +82,60 @@ pub fn location_hash() -> String {
     obj.to_string(&mut s);
     s
 }
+
+/// Ask the page to put `text` on the clipboard; the answer arrives from [`clipboard_state`].
+///
+/// Output: `Err` when the page has no clipboard API to ask, so the caller shows that instead of
+/// waiting for an answer that never comes.
+pub fn clipboard_copy(text: &str) -> Result<(), String> {
+    unsafe { hero_clipboard_copy(JsObject::string(text)) }
+    if unsafe { hero_clipboard_state() } == NO_REQUEST {
+        return Err(CLIPBOARD_MISSING.into());
+    }
+    Ok(())
+}
+
+/// Ask the page to read the clipboard; the answer arrives from [`clipboard_state`].
+pub fn clipboard_paste() -> Result<(), String> {
+    unsafe { hero_clipboard_paste() }
+    if unsafe { hero_clipboard_state() } == NO_REQUEST {
+        return Err(CLIPBOARD_MISSING.into());
+    }
+    Ok(())
+}
+
+/// Where the request made last stands (never "still running" is conflated with "no request").
+pub fn clipboard_state() -> ClipboardState {
+    match unsafe { hero_clipboard_state() } {
+        0 => ClipboardState::Running,
+        1 => ClipboardState::Copied,
+        2 => ClipboardState::CopyFailed,
+        3 => ClipboardState::Pasted,
+        4 => ClipboardState::Empty,
+        5 => ClipboardState::PasteFailed,
+        _ => ClipboardState::NoRequest,
+    }
+}
+
+/// The text of a settled read, or the browser's reason for a refusal.
+pub fn clipboard_text() -> String {
+    let obj = unsafe { hero_clipboard_text() };
+    let mut s = String::new();
+    obj.to_string(&mut s);
+    s
+}
+
+/// Forget the last request (its text is kept by the caller).
+pub fn clipboard_reset() {
+    unsafe { hero_clipboard_reset() }
+}
+
+/// `hero_clipboard_state`'s "there is no request at all" (the page lacks the API).
+const NO_REQUEST: i32 = -1;
+
+/// Shown when the page has no clipboard API to ask.
+pub const CLIPBOARD_MISSING: &str =
+    "이 브라우저에서는 클립보드를 쓸 수 없습니다 (HTTPS 또는 localhost에서 열어 주세요)";
 
 /// `localStorage`-backed [`KeyValueStore`].
 pub struct LocalStorage;

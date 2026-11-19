@@ -255,13 +255,19 @@ pub fn battle_set_flags(scene: &Scene) -> BTreeSet<u8> {
 }
 
 /// The battle map (`0x3NNN`) instruction `c` of a record with trigger `trigger` loads: a
-/// `load_map` of one, or a battle setup's `battle_end` to one (a `run` record before the phases;
-/// SNR4's last two battles load their maps so). A phase's `battle_end` to a battle map is not a
-/// load: the battle goes on with that map ([`MapLeg`]).
+/// `load_map` of one, or a battle setup's `battle_end` to one (a `run` record of the setup group;
+/// SNR4's last two battles load their maps so).
+///
+/// Why the setup group only: the deployment setup (group 0, [`SETUP_GROUP`]) is where the docs
+/// and FORMATS describe a battle loading its map with a `battle_end` to another map. Groups 1–2
+/// (the start and the opening) were taken as a load too, but no real pack does that, and a
+/// `battle_end` there would more likely be an error to speak up about than a map to fetch. A
+/// phase's `battle_end` to a battle map is not a load: the battle goes on with that map
+/// ([`MapLeg`]).
 pub(crate) fn loaded_battle_map(trigger: &crate::scenario::Trigger, c: &Instr) -> Option<u16> {
     let map = match c.mnemonic {
         "load_map" => c.operands.get("map"),
-        "battle_end" if trigger.kind == RUN && trigger.group < FIRST_PHASE_GROUP => {
+        "battle_end" if trigger.kind == RUN && trigger.group == SETUP_GROUP => {
             c.operands.get("next_map")
         }
         _ => None,
@@ -1175,6 +1181,8 @@ pub struct EventSources<'a> {
     pub cell_change: &'a mut dyn FnMut(Pos, u8) -> Result<CellChange, String>,
 }
 
+/// The trigger group of a battle block that sets the battle up: the map it loads, its rosters.
+pub const SETUP_GROUP: u8 = 0;
 /// First trigger group of a battle block that plays during the battle: group 0 loads the map,
 /// 1 starts the battle, 2 is the opening.
 pub const FIRST_PHASE_GROUP: u8 = 3;
@@ -1401,8 +1409,9 @@ enum ScriptEnd {
     Done,
     /// `leave_parallel`: the phase is over.
     LeavesPhase,
-    /// `battle_end` (the battle is won) or `goto_block` (the scenario moves on).
-    EndsBattle,
+    /// `battle_end` or `goto_block`: the script ends with the battle **won** (the scenario moves
+    /// on). Not to be confused with [`Self::ends_battle`], which is true for a loss as well.
+    Won,
     /// `game_over`: the battle is lost.
     Lost,
     /// A part guarded by flags other records set ended the script ([`Branch`]); what follows
@@ -1413,7 +1422,7 @@ enum ScriptEnd {
 impl ScriptEnd {
     /// Whether the battle is over (won or lost) where the script ended.
     fn ends_battle(self) -> bool {
-        matches!(self, ScriptEnd::EndsBattle | ScriptEnd::Lost)
+        matches!(self, ScriptEnd::Won | ScriptEnd::Lost)
     }
 }
 
@@ -2155,7 +2164,7 @@ impl EventWriter<'_, '_> {
                     break;
                 }
                 "battle_end" | "goto_block" => {
-                    end = ScriptEnd::EndsBattle;
+                    end = ScriptEnd::Won;
                     break;
                 }
                 // The battle is lost (SNR4's Ye castle burns down at turn 28).
@@ -2228,7 +2237,7 @@ impl EventWriter<'_, '_> {
             }
         }
         flush(&mut scene, actions, self);
-        if end == ScriptEnd::EndsBattle {
+        if end == ScriptEnd::Won {
             actions.extend(self.ended_flag_action());
             actions.push(EventAction::Victory);
         }
@@ -2275,6 +2284,32 @@ pub(crate) fn objective_text(raw: &str) -> String {
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
         .join(" / ")
+}
+
+/// Adds `extra` to the actions of a base battle's event the original record also matched.
+///
+/// * Input: the base event's `actions` (mutated), and the actions the record's script produced
+///   ([`moves_on`]'s included).
+/// * Output: nothing; `actions` holds the merged list.
+/// * Why a helper: a base event and a record that share an occasion are one event, so what the
+///   record does is added in front of the base battle's `Victory`. Halving is the one action that
+///   is kept even when the list already has an equal one: halving one side twice is not halving
+///   it once.
+fn add_into_event(actions: &mut Vec<EventAction>, extra: impl Iterator<Item = EventAction>) {
+    let mut at = actions
+        .iter()
+        .position(|a| *a == EventAction::Victory)
+        .unwrap_or(actions.len());
+    for a in extra {
+        if a == EventAction::Victory {
+            if !actions.contains(&a) {
+                actions.push(a);
+            }
+        } else if matches!(a, EventAction::Halve { .. }) || !actions.contains(&a) {
+            actions.insert(at, a);
+            at += 1;
+        }
+    }
 }
 
 /// Re-stage `base` as the original battle `orig` of `pairing` on the map `map_id`, with the
@@ -2792,7 +2827,7 @@ pub fn convert(
         let leaves = match end {
             ScriptEnd::LeavesPhase => true,
             ScriptEnd::Done => !parallel,
-            ScriptEnd::EndsBattle | ScriptEnd::Lost | ScriptEnd::Branched => false,
+            ScriptEnd::Won | ScriptEnd::Lost | ScriptEnd::Branched => false,
         };
         if !leaves {
             return Vec::new();
@@ -2938,23 +2973,8 @@ pub fn convert(
                 };
                 let kept = &mut battle.events[k];
                 let before = kept.actions.clone();
-                let mut at = kept
-                    .actions
-                    .iter()
-                    .position(|a| *a == EventAction::Victory)
-                    .unwrap_or(kept.actions.len());
-                for a in extra.into_iter().chain(moved) {
-                    if a == EventAction::Victory {
-                        if !kept.actions.contains(&a) {
-                            kept.actions.push(a);
-                        }
-                    } else if matches!(a, EventAction::Halve { .. }) || !kept.actions.contains(&a) {
-                        // (Halving twice is not halving once.)
-                        kept.actions.insert(at, a);
-                        at += 1;
-                    }
-                }
-                if end == ScriptEnd::EndsBattle && !kept.actions.contains(&EventAction::Victory) {
+                add_into_event(&mut kept.actions, extra.into_iter().chain(moved));
+                if end == ScriptEnd::Won && !kept.actions.contains(&EventAction::Victory) {
                     kept.actions.push(EventAction::Victory);
                 }
                 if staged && kept.actions != before {
@@ -4405,6 +4425,41 @@ item = "wine"
             ]
         );
         assert!(matches!(rec9.actions[2], EventAction::SetTerrain { .. }));
+    }
+
+    /// Merging a record into the base battle's event keeps a halving even when the event already
+    /// halves the same side (halving twice is not halving once), leaves out what it already has,
+    /// adds what it does not in front of the base victory, and never adds a second victory.
+    #[test]
+    fn merging_into_a_base_event_keeps_repeated_halvings() {
+        let halve = |side| EventAction::Halve {
+            side,
+            stat: HalveStat::Morale,
+        };
+        let drama = |scene: &str| EventAction::Drama {
+            scene: scene.into(),
+        };
+        let mut actions = vec![halve(Side::Enemy), drama("base"), EventAction::Victory];
+        add_into_event(
+            &mut actions,
+            vec![
+                halve(Side::Enemy),
+                drama("base"),
+                drama("record"),
+                EventAction::Victory,
+            ]
+            .into_iter(),
+        );
+        assert_eq!(
+            actions,
+            [
+                halve(Side::Enemy),
+                drama("base"),
+                halve(Side::Enemy),
+                drama("record"),
+                EventAction::Victory,
+            ]
+        );
     }
 
     /// A trigger record's `game_over` loses the battle there; what follows it never runs.

@@ -905,6 +905,15 @@ impl Recorder {
     }
 }
 
+/// Seconds to pause for a `@wait` step.
+///
+/// Capped at [`hero_core::script::MAX_WAIT_MS`], which the parser refuses to exceed: a quick
+/// save can still carry a longer value after hand editing, and a pause that long would leave
+/// the player no way on but skipping the scene.
+fn wait_seconds(ms: u32) -> f32 {
+    ms.min(hero_core::script::MAX_WAIT_MS) as f32 / 1000.0
+}
+
 /// How far the timed step on screen got, for a quick save ([`SceneResume::playing`]).
 ///
 /// Input: what the screen is doing and the stage's darkness (0–1). Output: the record, `None`
@@ -1119,7 +1128,9 @@ impl DramaScreen {
                 }
             }
             (Some(Playing::Wait { ms }), _) if ms > 0 => {
-                screen.current = Current::Wait(ms as f32 / 1000.0);
+                // A hand-edited save could ask for hours; a pause is a beat, so it is capped at
+                // what the parser accepts at all, and skipping still works.
+                screen.current = Current::Wait(wait_seconds(ms));
             }
             (Some(Playing::Fade { permille }), _) => {
                 // From where it was towards the end the recorded fade step set.
@@ -1487,7 +1498,7 @@ impl DramaScreen {
             Step::Show { .. } | Step::Hide(_) => self.stage.apply(&step, skipping),
             Step::Wait { ms } => {
                 if !skipping {
-                    self.current = Current::Wait(ms as f32 / 1000.0);
+                    self.current = Current::Wait(wait_seconds(ms));
                 }
             }
             Step::FadeOut | Step::FadeIn => {
@@ -1948,6 +1959,16 @@ mod tests {
         assert_eq!(playing_of(&Current::Duel, 1.0), Some(Playing::DuelAct));
         assert_eq!(playing_of(&Current::Next, 1.0), None);
         assert_eq!(playing_of(&Current::Done, 1.0), None);
+    }
+
+    /// A pause is capped both when played and when restored: a hand-edited save cannot park the
+    /// player in a scene for hours.
+    #[test]
+    fn a_restored_wait_is_capped() {
+        assert!((wait_seconds(600) - 0.6).abs() < 1e-6);
+        let cap = hero_core::script::MAX_WAIT_MS;
+        assert!((wait_seconds(cap) - cap as f32 / 1000.0).abs() < 1e-6);
+        assert!((wait_seconds(u32::MAX) - cap as f32 / 1000.0).abs() < 1e-6);
     }
 
     /// A duel move that was playing is played again: the stage is rebuilt without it.

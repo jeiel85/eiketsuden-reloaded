@@ -317,6 +317,9 @@ enum Stage {
     DecodeSound {
         future: BoxFuture<Result<Decoded, macroquad::Error>>,
         started: f64,
+        /// Seconds this decode may take: a split song decodes its intro and its loop, so it gets
+        /// one [`SOUND_DECODE_TIMEOUT`] for each instead of sharing a single one.
+        budget: f64,
     },
 }
 
@@ -710,8 +713,15 @@ impl Media {
                                 .then(|| split_loop(&bytes))
                                 .flatten();
                             let (intro, bytes) = match split {
-                                Some(split) => (split.intro, split.looped),
+                                Some(split) => (Some(split.intro), split.looped),
                                 None => (None, bytes),
+                            };
+                            // Two decodes back to back (the intro, then the loop): each gets its
+                            // own timeout, so a slow machine is not charged twice for one song.
+                            let budget = if intro.is_some() {
+                                2.0 * SOUND_DECODE_TIMEOUT
+                            } else {
+                                SOUND_DECODE_TIMEOUT
                             };
                             job.stage = Stage::DecodeSound {
                                 future: Box::pin(async move {
@@ -725,6 +735,7 @@ impl Media {
                                     Ok(Decoded { sound, intro })
                                 }),
                                 started: get_time(),
+                                budget,
                             };
                         }
                         (Ok(bytes), _) => job.stage = Stage::Decode(bytes),
@@ -763,14 +774,18 @@ impl Media {
                         JobKind::Sound { .. } => Outcome::Failed("unexpected decode stage".into()),
                     });
                 }
-                Stage::DecodeSound { future, started } => {
+                Stage::DecodeSound {
+                    future,
+                    started,
+                    budget,
+                } => {
                     if let Some(result) = poll_once(future) {
                         return Some(match result {
                             Ok(decoded) => Outcome::Sound(decoded),
                             Err(e) => Outcome::Failed(describe_error(&e)),
                         });
                     }
-                    if get_time() - *started > SOUND_DECODE_TIMEOUT {
+                    if get_time() - *started > *budget {
                         return Some(Outcome::Failed("audio decoding timed out".into()));
                     }
                     return None;
@@ -812,20 +827,26 @@ impl Media {
 
     /// Record that a job will never finish: its slot is `Missing` (callers draw their fallbacks)
     /// and its key joins the list the loading screen reports ([`Media::take_failures`]).
+    ///
+    /// A key is listed once: a caller that asks again before the slot turns `Missing` can start
+    /// the same job twice, and the report would name the file twice.
     fn give_up(inner: &mut Inner, kind: JobKind) {
-        match kind {
+        let key = match kind {
             JobKind::Texture { key } => {
                 inner.textures.insert(key.clone(), Slot::Missing);
-                inner.failures.push(key);
+                key
             }
-            JobKind::Sound { key, .. } => {
+            JobKind::Sound { key } => {
                 inner.sounds.insert(key.clone(), Slot::Missing);
-                inner.failures.push(key);
+                key
             }
             JobKind::IconIndex => {
                 inner.icons = Some(Slot::Missing);
-                inner.failures.push(ICON_INDEX.to_string());
+                ICON_INDEX.to_string()
             }
+        };
+        if !inner.failures.contains(&key) {
+            inner.failures.push(key);
         }
     }
 }
@@ -846,9 +867,8 @@ enum Outcome {
 /// A music file split where its loop starts ([`split_loop`]).
 #[derive(Debug, Clone, PartialEq)]
 struct LoopSplit {
-    /// The part before the loop as a WAV file, and its seconds (`None` when the loop starts at
-    /// the first frame).
-    intro: Option<(Vec<u8>, f64)>,
+    /// The part before the loop as a WAV file, and its seconds.
+    intro: (Vec<u8>, f64),
     /// The loop as a WAV file.
     looped: Vec<u8>,
 }
@@ -858,16 +878,20 @@ struct LoopSplit {
 /// * Input: the bytes of a sound file.
 /// * Output: the intro and the loop as two WAV files, or `None` to play the file as it is: not
 ///   an uncompressed WAV file, no `smpl` loop, a first loop that is not forward (backward or
-///   alternating), a loop over every frame, or a loop that does not
-///   fit the samples (ignored rather than refused, as a player that does not know the chunk
-///   would).
+///   alternating), a loop that does not fit the samples (ignored rather than refused, as a
+///   player that does not know the chunk would), a loop with a fixed play count, a loop over
+///   every frame, or a file that goes on after the loop's end.
 /// * Why: macroquad 0.4 repeats only whole sounds, so the audio manager plays the intro once
 ///   and then repeats the loop as a sound of its own ([`crate::audio`]). One file with the
 ///   chunk, rather than a separate intro file, so music without an intro costs no extra
 ///   lookups (a failed one is a 404 and a warning on the web), a song the original mode adds
 ///   while the game runs replaces both parts at once, and WAV editors can set the point.
-///   Frames after the loop's end are left out (a release tail no repeat plays). The intro's
-///   length comes from its frames, so the switch needs no decoder's report.
+///   The intro's length comes from its frames, so the switch needs no decoder's report.
+///
+/// What it refuses, it refuses because repeating the loop would tell a different story than
+/// the file does: a fixed play count would be repeated forever, and a tail after the loop's end
+/// (a release or an ending written past the loop) would never be heard. Such a file plays as it
+/// is, once when it is one-shot (a jingle keeps its ending) and whole-file looping as music.
 fn split_loop(bytes: &[u8]) -> Option<LoopSplit> {
     let u16_at =
         |b: &[u8], at: usize| Some(u16::from_le_bytes(b.get(at..at + 2)?.try_into().ok()?));
@@ -907,9 +931,18 @@ fn split_loop(bytes: &[u8]) -> Option<LoopSplit> {
     }
     let first = u32_at(sampler, 36 + 8)? as usize;
     let last = u32_at(sampler, 36 + 12)? as usize;
+    // Play count: 0 is "forever", anything else a fixed number of passes. macroquad repeats a
+    // whole sound forever, so a finite count cannot be honoured by repeating the loop; the file
+    // is played as it is (once) instead, so nothing invents a repeat the file did not ask for.
+    if u32_at(sampler, 36 + 20)? != 0 {
+        return None;
+    }
     let frames = data.len() / block;
     let end = last.saturating_add(1).min(frames);
-    if first >= end || (first == 0 && end == frames) {
+    // A split needs a part before the loop (a loop from frame 0 is the whole file looped) and the
+    // loop must run to the last frame: a tail past it is the file's ending, which repeating the
+    // loop would never reach.
+    if first == 0 || first >= end || end != frames {
         return None;
     }
     let wav = |samples: &[u8]| {
@@ -934,8 +967,8 @@ fn split_loop(bytes: &[u8]) -> Option<LoopSplit> {
         out
     };
     Some(LoopSplit {
-        intro: (first > 0).then(|| (wav(&data[..first * block]), first as f64 / f64::from(rate))),
-        looped: wav(&data[first * block..end * block]),
+        intro: (wav(&data[..first * block]), first as f64 / f64::from(rate)),
+        looped: wav(&data[first * block..]),
     })
 }
 
@@ -1157,7 +1190,7 @@ mod tests {
         assert!(!quad_snd_panics(&bytes));
         assert_eq!(decode(&bytes).2.len(), 441 + 2205);
         let split = split_loop(&bytes).expect("a loop start");
-        let (intro, seconds) = split.intro.expect("an intro");
+        let (intro, seconds) = split.intro;
         assert_eq!(seconds, 0.02);
         for (part, frames, first) in [(&intro, 441, 1000), (&split.looped, 2205, -12_000)] {
             assert!(!quad_snd_panics(part));
@@ -1170,11 +1203,19 @@ mod tests {
     /// `wav` with a `smpl` chunk of one loop from frame `first` to frame `last`, before or
     /// after the samples.
     fn looped_wav(wav: &[u8], first: u32, last: u32, before: bool) -> Vec<u8> {
-        looped_wav_of(wav, 0, first, last, before)
+        looped_wav_of(wav, 0, first, last, 0, before)
     }
 
-    /// [`looped_wav`] with the loop type `kind` (0 forward, 1 alternating, 2 backward).
-    fn looped_wav_of(wav: &[u8], kind: u32, first: u32, last: u32, before: bool) -> Vec<u8> {
+    /// [`looped_wav`] with the loop type `kind` (0 forward, 1 alternating, 2 backward) and its
+    /// play count (`0`: forever).
+    fn looped_wav_of(
+        wav: &[u8],
+        kind: u32,
+        first: u32,
+        last: u32,
+        count: u32,
+        before: bool,
+    ) -> Vec<u8> {
         let mut chunk = b"smpl".to_vec();
         chunk.extend(60u32.to_le_bytes());
         chunk.extend([0u8; 28]);
@@ -1183,7 +1224,8 @@ mod tests {
         chunk.extend(kind.to_le_bytes());
         chunk.extend(first.to_le_bytes());
         chunk.extend(last.to_le_bytes());
-        chunk.extend([0u8; 8]);
+        chunk.extend([0u8; 4]);
+        chunk.extend(count.to_le_bytes());
         let mut out = wav.to_vec();
         let at = if before { 36 } else { out.len() };
         out.splice(at..at, chunk);
@@ -1194,26 +1236,21 @@ mod tests {
 
     #[test]
     fn music_splits_at_its_loop_start() {
-        // Stereo: frames of four bytes. Loop over frames 100..=399 of 500, the chunk anywhere.
+        // Stereo: frames of four bytes. Loop over frames 100..=499 of 500, the chunk anywhere.
         let plain = wav(2, 8000, 500);
         for before in [false, true] {
-            let split = split_loop(&looped_wav(&plain, 100, 399, before)).unwrap();
-            let (intro, seconds) = split.intro.unwrap();
+            let split = split_loop(&looped_wav(&plain, 100, 499, before)).unwrap();
+            let (intro, seconds) = split.intro;
             assert_eq!(seconds, 100.0 / 8000.0);
             assert_eq!(&intro[44..], &plain[44..44 + 400]);
-            assert_eq!(
-                &split.looped[44..],
-                &plain[44 + 400..44 + 1600],
-                "the tail left out"
-            );
+            assert_eq!(&split.looped[44..], &plain[44 + 400..]);
             assert_eq!(&intro[..4], b"RIFF");
             assert_eq!(&intro[22..24], &2u16.to_le_bytes(), "the format is kept");
-            assert_eq!(decode(&split.looped).2.len(), 2 * 300);
+            assert_eq!(decode(&split.looped).2.len(), 2 * 400);
         }
-        // A loop from the first frame that stops early: the tail only.
-        let split = split_loop(&looped_wav(&plain, 0, 249, false)).unwrap();
-        assert_eq!(split.intro, None);
-        assert_eq!(decode(&split.looped).2.len(), 2 * 250);
+        // A loop from the first frame is the whole file looped, which needs no split; with a tail
+        // it is refused too (see below). So a split always has an intro.
+        assert_eq!(split_loop(&looped_wav(&plain, 0, 249, false)), None);
         // An end past the samples is the last frame.
         let split = split_loop(&looped_wav(&plain, 100, 9999, false)).unwrap();
         assert_eq!(decode(&split.looped).2.len(), 2 * 400);
@@ -1225,16 +1262,35 @@ mod tests {
         assert_eq!(split_loop(&looped_wav(&plain, 300, 200, false)), None);
         for kind in [1, 2] {
             assert_eq!(
-                split_loop(&looped_wav_of(&plain, kind, 100, 399, false)),
+                split_loop(&looped_wav_of(&plain, kind, 100, 499, 0, false)),
                 None
             );
         }
         assert_eq!(split_loop(&base_pack_file("bgm/victory.ogg")), None);
         // Cut short anywhere, it never panics.
-        let full = looped_wav(&plain, 100, 399, false);
+        let full = looped_wav(&plain, 100, 499, false);
         for len in 0..full.len() {
             let _ = split_loop(&full[..len]);
         }
+    }
+
+    /// A loop the file does not want repeated forever is not split: a fixed play count and a
+    /// tail written past the loop's end would both be undone by repeating the loop, so the file
+    /// plays as it is (once) and keeps its ending instead.
+    #[test]
+    fn a_loop_that_ends_the_file_is_the_only_one_split() {
+        let plain = wav(2, 8000, 500);
+        // Three passes of the loop, then nothing: repeating it forever would be a lie.
+        assert_eq!(
+            split_loop(&looped_wav_of(&plain, 0, 100, 499, 3, false)),
+            None
+        );
+        // A tail after the loop (frames 100..=399 of 500): its ending would never be heard.
+        assert_eq!(split_loop(&looped_wav(&plain, 100, 399, false)), None);
+        // A loop from the start with a tail: the same, no intro and no tail lost.
+        assert_eq!(split_loop(&looped_wav(&plain, 0, 399, false)), None);
+        // Forever, ending exactly at the last frame: split (the case music uses).
+        assert!(split_loop(&looped_wav(&plain, 100, 499, false)).is_some());
     }
 
     #[test]
@@ -1539,6 +1595,20 @@ mod tests {
             vec!["bg/missing", "bgm/missing", ICON_INDEX]
         );
         assert!(media.take_failures().is_empty(), "reported twice");
+        // A key that fails again (a duplicate request was in flight) is not listed a second time.
+        {
+            let mut inner = media.inner.borrow_mut();
+            for _ in 0..2 {
+                Media::finish(
+                    &mut inner,
+                    JobKind::Texture {
+                        key: "bg/missing".into(),
+                    },
+                    Outcome::Failed("404".into()),
+                );
+            }
+        }
+        assert_eq!(media.take_failures(), vec!["bg/missing"]);
     }
 
     #[test]

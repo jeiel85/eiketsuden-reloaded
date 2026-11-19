@@ -254,20 +254,25 @@ impl Settings {
         self
     }
 
-    /// Reset every preference to its default, keeping the two things that are not preferences
-    /// of the settings screen: the window mode (switching it unexpectedly is jarring) and the
+    /// Reset the preferences of the settings screen to their defaults, keeping the three things
+    /// that are not preferences: the window mode (switching it unexpectedly is jarring), the
     /// original-mode folder with its switch (the player's own copy, chosen in 원작 데이터; a
-    /// reset that forgot them would make the next launch fall back to the base pack).
+    /// reset that forgot them would make the next launch fall back to the base pack), and the
+    /// volumes (they are set for the player's device and room, not for the game's look).
     pub fn reset_to_defaults(&mut self) {
         let (fullscreen, original_dir, original_mode) = (
             self.fullscreen,
             self.original_dir.take(),
             self.original_mode,
         );
+        let (master, bgm, sfx) = (self.master_volume, self.bgm_volume, self.sfx_volume);
         *self = Settings::default();
         self.fullscreen = fullscreen;
         self.original_dir = original_dir;
         self.original_mode = original_mode;
+        self.master_volume = master;
+        self.bgm_volume = bgm;
+        self.sfx_volume = sfx;
     }
 
     /// The quick save slot F5 and F9 use.
@@ -374,9 +379,11 @@ mod tests {
     }
 
     #[test]
-    fn resetting_defaults_keeps_the_window_and_the_original_folder() {
+    fn resetting_defaults_keeps_the_window_the_original_folder_and_the_volumes() {
         let mut s = Settings {
             master_volume: 10,
+            bgm_volume: 20,
+            sfx_volume: 30,
             text_speed: TextSpeed::Instant,
             danger_range: true,
             fullscreen: true,
@@ -387,15 +394,16 @@ mod tests {
         };
         s.reset_to_defaults();
         let d = Settings::default();
-        assert_eq!(s.master_volume, d.master_volume);
         assert_eq!(s.text_speed, d.text_speed);
         assert!(!s.danger_range);
         assert_eq!(s.quick_slot, 1);
-        // Not preferences of the settings screen: kept.
+        // Not preferences of the settings screen: kept — and the volumes, which the player
+        // tuned for their own speakers, are not reset either.
         assert!(s.fullscreen);
         assert_eq!(s.original_dir.as_deref(), Some(r"D:\games\hero\GAME"));
         assert!(s.original_mode);
         assert_eq!(s.original_to_play(), Some(r"D:\games\hero\GAME"));
+        assert_eq!((s.master_volume, s.bgm_volume, s.sfx_volume), (10, 20, 30));
     }
 
     #[test]

@@ -184,6 +184,115 @@ mod tests {
         assert!(!report.contains(&format!("  {} (", ids[0])), "{report}");
     }
 
+    /// An officer nothing in the pack names, to check that a path does not over-count.
+    fn with_a_spare_officer(pack: &mut Pack) {
+        let mut spare = pack.officers.values().next().expect("officers").clone();
+        spare.id = "spare".into();
+        spare.name = "여분".into();
+        pack.officers.insert(spare.id.clone(), spare);
+    }
+
+    /// Every command that names an officer counts (`@join`, `@leave`, `@away`, `@level`,
+    /// `@class`, `@duel`'s two fighters), and one nothing names stays unused.
+    #[test]
+    fn every_scene_command_that_names_an_officer_counts() {
+        let mut pack = pack("../hero-core/tests/fixtures/mini");
+        pack.campaign.starting_officers.clear();
+        pack.battles.clear();
+        pack.scenes.clear();
+        with_a_spare_officer(&mut pack);
+        let ids: Vec<String> = pack
+            .officers
+            .keys()
+            .filter(|id| id.as_str() != "spare")
+            .cloned()
+            .collect();
+        let scene = hero_core::script::parse_drama(
+            "t.drama",
+            &format!(
+                "== s\n@join {}\n@leave {}\n@away {}\n@level {} 1\n@class {} bandit\n\
+                 @duel {} {}\n",
+                ids[0], ids[1], ids[2], ids[3], ids[4], ids[5], ids[4]
+            ),
+        )
+        .unwrap()
+        .remove(0);
+        pack.scenes.insert(scene.id.clone(), scene);
+        assert_eq!(
+            used_officers(&pack),
+            ids.iter().map(String::as_str).collect::<BTreeSet<_>>()
+        );
+        assert!(render(&pack).starts_with("1 of 7 officers are not used"));
+    }
+
+    /// A battle names its units' officers, its deployment, and the officers its conditions,
+    /// triggers and actions refer to (`unit_refs`); a spawn tag names no officer.
+    #[test]
+    fn a_battle_names_its_units_deploy_and_unit_refs() {
+        let mut pack = pack("../hero-core/tests/fixtures/mini");
+        pack.campaign.starting_officers.clear();
+        pack.scenes.clear();
+        pack.battles.clear();
+        with_a_spare_officer(&mut pack);
+        let battle: hero_core::battledef::BattleDef = toml::from_str(
+            r#"
+id = "t"
+name = "t"
+objective = "t"
+turn_limit = 5
+victory = [{ type = "defeat_unit", target = "zhang_bao" }]
+bonus = { condition = { type = "reach", who = "deng_mao", pos = [1, 1] }, exp = 1 }
+
+[map]
+rows = ".."
+legend = { "." = "plain" }
+
+[deploy]
+max = 2
+required = ["liu_bei"]
+forbidden = ["guan_yu"]
+slots = [[0, 0]]
+
+[[units]]
+side = "enemy"
+officer = "zhang_fei"
+pos = [1, 0]
+
+[[units]]
+side = "enemy"
+name = "복병"
+class = "bandit"
+pos = [0, 1]
+ai = "target"
+ai_target = "jian_yong"
+
+[[events]]
+trigger = { type = "unit_defeated", target = "boss" }
+actions = [{ type = "set_flag", flag = "captives", value = 1 }]
+"#,
+        )
+        .unwrap();
+        pack.battles.insert(battle.id.clone(), battle);
+        assert_eq!(
+            used_officers(&pack),
+            BTreeSet::from([
+                "liu_bei",
+                "guan_yu",
+                "zhang_fei",
+                "jian_yong",
+                "zhang_bao",
+                "deng_mao",
+            ])
+        );
+        // The one nothing names, and the `boss` tag (no officer of that id), stay unused.
+        let report = render(&pack);
+        assert!(
+            report.starts_with("1 of 7 officers are not used"),
+            "{report}"
+        );
+        assert!(report.contains("  spare ("), "{report}");
+    }
+
     #[test]
     fn the_fixture_and_the_base_pack_report() {
         // The fixture's campaign and battles name its officers.

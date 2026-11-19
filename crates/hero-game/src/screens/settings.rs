@@ -10,7 +10,7 @@
 //! A row explains itself when the pointer rests on it ([`crate::ui::tooltip`]): the label fits on
 //! the row, the meaning of the setting does not.
 
-use crate::app::{Ctx, Screen, Transition};
+use crate::app::{Ctx, RemakeMaps, Screen, Transition};
 use crate::audio::sfx;
 use crate::gfx::{fill_rect, Align, TextStyle};
 use crate::settings::{cycle, ArtStyle, BattleFx, BattleSpeed, PortraitStyle, Settings, TextSpeed};
@@ -67,7 +67,9 @@ impl Row {
             Row::AutoEndTurn => Some(
                 "끄면 부대가 모두 행동해도 '턴 종료'를 누를 때까지 기다립니다. 켜면 원작처럼 저절로 넘어갑니다.",
             ),
-            Row::Defaults => Some("음량·화면 표시를 기본값으로 되돌립니다. 창 모드와 원작 폴더는 그대로 둡니다."),
+            Row::Defaults => Some(
+                "화면 표시 설정을 기본값으로 되돌립니다. 음량·창 모드·원작 폴더는 그대로 둡니다.",
+            ),
             Row::Back => None,
         }
     }
@@ -113,10 +115,10 @@ impl SettingsScreen {
 
     /// Input: the settings, whether the chain holds the original mode's pack below the top
     /// ([`crate::platform::DataRoot::has_original_layer`]) and whether this launch's conversion
-    /// left out the new art's maps (`Ctx::remake_maps_missing`). Without an original pack (the
-    /// web build, the base pack alone) the face and art choices change nothing, so their rows
-    /// are shown disabled.
-    fn items(&self, s: &Settings, faces: bool, maps_missing: bool) -> Vec<MenuItem> {
+    /// drew the new art's maps ([`RemakeMaps`]). Without an original pack (the web build, the
+    /// base pack alone) the face and art choices change nothing, so their rows are shown
+    /// disabled.
+    fn items(&self, s: &Settings, faces: bool, maps: RemakeMaps) -> Vec<MenuItem> {
         self.rows
             .iter()
             .map(|row| match row {
@@ -150,9 +152,16 @@ impl SettingsScreen {
                 Row::Art if !faces => MenuItem::new("그림")
                     .detail("원작 데이터 없음")
                     .enabled(false),
-                Row::Art if s.art == ArtStyle::Remake && maps_missing => MenuItem::new("그림")
-                    .detail("새 그림 · 맵은 재시작 후")
-                    .adjustable(),
+                Row::Art if s.art == ArtStyle::Remake && maps == RemakeMaps::NotDrawn => {
+                    MenuItem::new("그림")
+                        .detail("새 그림 · 맵은 재시작 후")
+                        .adjustable()
+                }
+                Row::Art if s.art == ArtStyle::Remake && maps == RemakeMaps::Failed => {
+                    MenuItem::new("그림")
+                        .detail("새 그림 · 맵 변환 실패")
+                        .adjustable()
+                }
                 Row::Art => MenuItem::new("그림").detail(s.art.label()).adjustable(),
                 Row::DangerRange => MenuItem::new("위험 범위")
                     .detail(if s.danger_range { "켬" } else { "끔" })
@@ -173,7 +182,7 @@ impl SettingsScreen {
         let items = self.items(
             &ctx.settings,
             ctx.data_root.has_original_layer(),
-            ctx.remake_maps_missing,
+            ctx.remake_maps,
         );
         self.menu.set_items(items);
     }
@@ -239,7 +248,7 @@ impl Screen for SettingsScreen {
         let items = self.items(
             &ctx.settings,
             ctx.data_root.has_original_layer(),
-            ctx.remake_maps_missing,
+            ctx.remake_maps,
         );
         self.menu = placed(items, ctx.gfx.size());
         self.hover = HoverTimer::default();
@@ -290,16 +299,21 @@ impl Screen for SettingsScreen {
             TextStyle::main(theme::TEXT_ACCENT).shadow(theme::TEXT_SHADOW),
         );
         self.menu.draw(ctx);
+        // The storage location line, when the window leaves room for it: on a canvas too short
+        // for both, the rows win (a line drawn over the last row would hide a setting).
+        let window = window_rect(self.menu.rect());
         let where_ = format!("저장 위치: {}", ctx.storage.location());
         let lines = ctx
             .gfx
             .wrap(&where_, crate::gfx::FontId::Small, 1, canvas.x - 20.0);
-        ctx.gfx.text_lines(
-            &lines,
-            10.0,
-            canvas.y - 4.0 - 12.0 * lines.len() as f32,
-            TextStyle::small(theme::TEXT_DISABLED),
-        );
+        if storage_line_fits(window, canvas, lines.len()) {
+            ctx.gfx.text_lines(
+                &lines,
+                10.0,
+                canvas.y - 4.0 - 12.0 * lines.len() as f32,
+                TextStyle::small(theme::TEXT_DISABLED),
+            );
+        }
         // The explanation of the row under the pointer, once it has rested there.
         if self.hover.visible() {
             if let (Some(i), Some(p)) = (self.hover.target(), ctx.input.pointer()) {
@@ -324,7 +338,9 @@ const FOOTING: f32 = 6.0;
 /// scrolls (arrows, wheel, drag — [`Menu`] handles it).
 fn placed(items: Vec<MenuItem>, canvas: Vec2) -> Menu {
     let fits = canvas.y - STORAGE_LINE - HEADING - FOOTING;
-    let max_rows = (fits / theme::ROW_HEIGHT).floor().max(3.0) as usize;
+    // At least one row, so the menu is never empty; on a canvas too small even for that the
+    // window takes the top of the canvas and [`storage_line_fits`] drops the line below it.
+    let max_rows = (fits / theme::ROW_HEIGHT).floor().max(1.0) as usize;
     let mut menu = Menu::new(items);
     menu.framed = false;
     if menu.items.len() > max_rows {
@@ -337,6 +353,13 @@ fn placed(items: Vec<MenuItem>, canvas: Vec2) -> Menu {
     menu.set_position(((canvas.x - WIDTH) / 2.0).round() + 6.0, top + HEADING);
     menu.set_width(WIDTH - 12.0);
     menu
+}
+
+/// Whether the storage location line (`lines` of them) still fits under the settings `window` on
+/// a `canvas`. On a canvas too short for the window and the line, the line is dropped rather than
+/// drawn over the last rows.
+fn storage_line_fits(window: Rect, canvas: Vec2, lines: usize) -> bool {
+    window.bottom() <= canvas.y - 4.0 - 12.0 * lines as f32
 }
 
 /// The window drawn around the settings menu `m`, with its heading.
@@ -358,7 +381,10 @@ mod tests {
         }
         assert!(screen.rows.contains(&Row::QuickSlot));
         let canvas = crate::gfx::DEFAULT_CANVAS;
-        let menu = placed(screen.items(&Settings::default(), true, false), canvas);
+        let menu = placed(
+            screen.items(&Settings::default(), true, RemakeMaps::Ready),
+            canvas,
+        );
         let window = window_rect(menu.rect());
         assert!(window.y >= 0.0, "{window:?}");
         // The storage line takes the last 16 pixels.
@@ -371,7 +397,10 @@ mod tests {
     fn a_short_canvas_scrolls_the_list_instead_of_overflowing() {
         let screen = SettingsScreen::new();
         let canvas = Vec2::new(480.0, 200.0);
-        let mut menu = placed(screen.items(&Settings::default(), true, false), canvas);
+        let mut menu = placed(
+            screen.items(&Settings::default(), true, RemakeMaps::Ready),
+            canvas,
+        );
         let window = window_rect(menu.rect());
         assert!(window.y >= 0.0, "{window:?}");
         assert!(window.bottom() <= canvas.y - STORAGE_LINE, "{window:?}");
@@ -395,7 +424,9 @@ mod tests {
             .unwrap();
         let mut s = Settings::default();
         assert_eq!(
-            screen.items(&s, true, false)[at].detail.as_deref(),
+            screen.items(&s, true, RemakeMaps::Ready)[at]
+                .detail
+                .as_deref(),
             Some("1 / 4")
         );
         let slots: Vec<u8> = (1..=crate::saves::QUICK_SLOTS).collect();
@@ -416,36 +447,43 @@ mod tests {
             .position(|&r| r == Row::Portraits)
             .unwrap();
         let s = Settings::default();
-        let off = &screen.items(&s, false, false)[at];
+        let off = &screen.items(&s, false, RemakeMaps::Ready)[at];
         assert!(!off.enabled && !off.adjustable);
         assert_eq!(off.detail.as_deref(), Some("원작 데이터 없음"));
-        let on = &screen.items(&s, true, false)[at];
+        let on = &screen.items(&s, true, RemakeMaps::Ready)[at];
         assert!(on.enabled && on.adjustable);
         assert_eq!(on.detail.as_deref(), Some(s.portraits.label()));
     }
 
     /// The art row (D27): disabled without an original layer; with the new art chosen after a
-    /// conversion that left out its maps, it says the maps follow at the next launch.
+    /// conversion that left out its maps, it says the maps follow at the next launch — and says
+    /// the conversion failed when no restart would help.
     #[test]
     fn the_art_row_says_when_the_maps_follow() {
+        use RemakeMaps::{Failed, NotDrawn, Ready};
         let screen = SettingsScreen::new();
         let at = screen.rows.iter().position(|&r| r == Row::Art).unwrap();
         let mut s = Settings::default();
-        let off = &screen.items(&s, false, false)[at];
+        let off = &screen.items(&s, false, Ready)[at];
         assert!(!off.enabled);
         assert_eq!(off.detail.as_deref(), Some("원작 데이터 없음"));
         assert_eq!(
-            screen.items(&s, true, true)[at].detail.as_deref(),
+            screen.items(&s, true, NotDrawn)[at].detail.as_deref(),
             Some("원작")
         );
         s.art = ArtStyle::Remake;
         assert_eq!(
-            screen.items(&s, true, false)[at].detail.as_deref(),
+            screen.items(&s, true, Ready)[at].detail.as_deref(),
             Some("새 그림")
         );
-        let pending = &screen.items(&s, true, true)[at];
+        let pending = &screen.items(&s, true, NotDrawn)[at];
         assert!(pending.adjustable);
         assert_eq!(pending.detail.as_deref(), Some("새 그림 · 맵은 재시작 후"));
+        // A failed drawing is not something a restart fixes, so the row does not promise one.
+        assert_eq!(
+            screen.items(&s, true, Failed)[at].detail.as_deref(),
+            Some("새 그림 · 맵 변환 실패")
+        );
     }
 
     /// Every setting row explains itself (the tooltip text is not empty and stays short enough
@@ -484,13 +522,17 @@ mod tests {
         let s = Settings::default();
         assert!(s.auto_end_turn);
         assert_eq!(
-            screen.items(&s, true, false)[at].detail.as_deref(),
+            screen.items(&s, true, RemakeMaps::Ready)[at]
+                .detail
+                .as_deref(),
             Some("켬")
         );
         let mut flipped = s;
         flipped.auto_end_turn = false;
         assert_eq!(
-            screen.items(&flipped, true, false)[at].detail.as_deref(),
+            screen.items(&flipped, true, RemakeMaps::Ready)[at]
+                .detail
+                .as_deref(),
             Some("끔")
         );
     }

@@ -589,6 +589,141 @@ fn box_blur(a: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
     out
 }
 
+/// A ground's mask over the part of the area where it is not zero.
+///
+/// The values are interpolated and blurred exactly as over the whole area, but only computed
+/// where the result is not zero: the mask is zero everywhere but around the ground's own cells,
+/// and neither the interpolation nor the blur reads further than its own radius.
+struct GroundMask {
+    /// The pixels the buffer covers (the valid part, grown by the ring the blur reads).
+    computed: Rect,
+    /// The pixels the buffer's values are exact for: the ones the mask is not zero in.
+    valid: Rect,
+    /// Row-major over `computed`, so `computed`'s width per row.
+    values: Vec<f32>,
+}
+
+impl GroundMask {
+    /// The mask at a pixel of the area, exactly as over the whole area: 0 outside
+    /// [`GroundMask::valid`] where the blur cannot reach.
+    fn at(&self, x: i64, y: i64) -> f32 {
+        if !self.valid.contains(x, y) {
+            return 0.0;
+        }
+        let px = (x - self.computed.x0) as usize;
+        let py = (y - self.computed.y0) as usize;
+        self.values[py * self.computed.w + px]
+    }
+}
+
+/// The mask of ground `g` over `area`: each pixel's bilinear interpolation between cell centres
+/// (or the cell it lies on, for a ground with no softness), box-blurred by its softness.
+///
+/// * Input: the map's per-cell grounds and size, the ground, and the area a window's picture is
+///   computed over.
+/// * Output: the values [`render_cells`] computes over the whole area, held only for the pixels
+///   the mask can be non-zero in.
+/// * Why: a mask over the whole area costs an interpolation and two blur passes per pixel for
+///   each of the eight grounds, which dominates a large map's picture; a ground's mask is zero
+///   everywhere but around its own cells. The values are unchanged: outside [`valid`] the blur
+///   cannot reach, and [`valid`] is kept a whole blur radius inside the computed rectangle so
+///   that the blur's edge repeat never differs from the whole-area one.
+///
+/// [`valid`]: GroundMask::valid
+fn ground_mask(
+    grounds: &[Ground],
+    width: usize,
+    height: usize,
+    g: Ground,
+    area: Rect,
+) -> GroundMask {
+    let r = g.softness();
+    let blur = if r == 0 { 0 } else { r / 3 + 1 };
+    let mut cells = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+    for y in 0..height as i64 {
+        for x in 0..width as i64 {
+            if grounds[y as usize * width + x as usize] == g {
+                cells = (
+                    cells.0.min(x),
+                    cells.1.min(y),
+                    cells.2.max(x),
+                    cells.3.max(y),
+                );
+            }
+        }
+    }
+    // The interpolation reads the two cells around a pixel's centre, so it reaches half a cell
+    // past the ground's cells (2 px of slack for the rounding); the blur then spreads it by its
+    // radius.
+    let spread = CELL as i64 / 2 + 2 + blur as i64;
+    let grow = |by: i64| {
+        let empty = Rect {
+            x0: area.x0,
+            y0: area.y0,
+            w: 0,
+            h: 0,
+        };
+        if cells.0 > cells.2 {
+            return empty;
+        }
+        let x0 = (cells.0 * CELL as i64 - by).max(area.x0);
+        let y0 = (cells.1 * CELL as i64 - by).max(area.y0);
+        let x1 = ((cells.2 + 1) * CELL as i64 + by).min(area.x0 + area.w as i64);
+        let y1 = ((cells.3 + 1) * CELL as i64 + by).min(area.y0 + area.h as i64);
+        if x1 <= x0 || y1 <= y0 {
+            return empty;
+        }
+        Rect {
+            x0,
+            y0,
+            w: (x1 - x0) as usize,
+            h: (y1 - y0) as usize,
+        }
+    };
+    let valid = grow(spread);
+    let computed = grow(spread + blur as i64);
+    if valid.w == 0 || valid.h == 0 {
+        return GroundMask {
+            computed,
+            valid,
+            values: Vec::new(),
+        };
+    }
+    let c = CELL as i64;
+    let cell = |x: i64, y: i64| -> f32 {
+        let x = x.clamp(0, width as i64 - 1) as usize;
+        let y = y.clamp(0, height as i64 - 1) as usize;
+        f32::from(u8::from(grounds[y * width + x] == g))
+    };
+    let (mw, mh) = (computed.w, computed.h);
+    let mut m = vec![0f32; mw * mh];
+    for py in 0..mh {
+        let y = computed.y0 + py as i64;
+        for px in 0..mw {
+            let x = computed.x0 + px as i64;
+            m[py * mw + px] = if r == 0 {
+                cell(x / c, y / c)
+            } else {
+                // Bilinear between cell centres.
+                let u = (x as f32 + 0.5) / CELL as f32 - 0.5;
+                let v = (y as f32 + 0.5) / CELL as f32 - 0.5;
+                let (i, j) = (u.floor() as i64, v.floor() as i64);
+                let (fu, fv) = (u - i as f32, v - j as f32);
+                (cell(i, j) * (1.0 - fu) + cell(i + 1, j) * fu) * (1.0 - fv)
+                    + (cell(i, j + 1) * (1.0 - fu) + cell(i + 1, j + 1) * fu) * fv
+            };
+        }
+    }
+    if blur > 0 {
+        m = box_blur(&m, mw, mh, blur);
+    }
+    GroundMask {
+        computed,
+        valid,
+        values: m,
+    }
+}
+
 /// Whether any pixel within `r` (a square) of each pixel is set; edges repeated.
 fn any_near(m: &[bool], w: usize, h: usize, r: usize) -> Vec<bool> {
     let f: Vec<f32> = m.iter().map(|&b| f32::from(u8::from(b))).collect();
@@ -598,6 +733,14 @@ fn any_near(m: &[bool], w: usize, h: usize, r: usize) -> Vec<bool> {
         .collect()
 }
 
+/// Cells per band that [`render_map`] draws at a time.
+///
+/// The renderer keeps some 35 bytes of `f32`/`bool` buffers per pixel while it draws, so a whole
+/// map in one go costs about 130 MB at the largest sizes (times [`crate::pack`]'s four threads).
+/// Drawing in bands keeps that per-pixel working set to a band plus [`MARGIN`], and since
+/// [`render_cells`] is pixel-identical to `render_map` (tested), the picture does not change.
+const BAND_CELLS: usize = 12;
+
 /// The whole picture of a map whose cells hold `cells` (terrain ids, row-major, `width` per
 /// row). `seed` varies the noise and object placement between maps.
 pub fn render_map(
@@ -606,7 +749,22 @@ pub fn render_map(
     height: usize,
     seed: u64,
 ) -> Result<RgbaImage, String> {
-    render_cells(cells, width, height, seed, (0, 0, width, height))
+    if cells.len() != width * height || width == 0 || height == 0 {
+        return Err(format!("{} cells for a {width}×{height} map", cells.len()));
+    }
+    let mut out = RgbaImage::new(width * CELL, height * CELL);
+    let mut y = 0;
+    while y < height {
+        let rows = BAND_CELLS.min(height - y);
+        let band = render_cells(cells, width, height, seed, (0, y, width, rows))?;
+        for by in 0..band.height {
+            let dst = (y * CELL + by) * out.width;
+            out.pixels[dst..dst + band.width]
+                .copy_from_slice(&band.pixels[by * band.width..(by + 1) * band.width]);
+        }
+        y += rows;
+    }
+    Ok(out)
 }
 
 /// The pixels of cells `(x, y, w, h)` of that map, exactly as [`render_map`] draws them.
@@ -678,44 +836,24 @@ pub fn render_cells(
             continue;
         }
         let r = g.softness();
-        let cell = |x: i64, y: i64| -> f32 {
-            let x = x.clamp(0, width as i64 - 1) as usize;
-            let y = y.clamp(0, height as i64 - 1) as usize;
-            f32::from(u8::from(grounds[y * width + x] == g))
-        };
-        let mut m = vec![0f32; aw * ah];
-        for py in 0..ah {
-            let y = area.y0 + py as i64;
-            for px in 0..aw {
-                let x = area.x0 + px as i64;
-                m[py * aw + px] = if r == 0 {
-                    cell(x / c, y / c)
-                } else {
-                    // Bilinear between cell centres.
-                    let u = (x as f32 + 0.5) / CELL as f32 - 0.5;
-                    let v = (y as f32 + 0.5) / CELL as f32 - 0.5;
-                    let (i, j) = (u.floor() as i64, v.floor() as i64);
-                    let (fu, fv) = (u - i as f32, v - j as f32);
-                    (cell(i, j) * (1.0 - fu) + cell(i + 1, j) * fu) * (1.0 - fv)
-                        + (cell(i, j + 1) * (1.0 - fu) + cell(i + 1, j + 1) * fu) * fv
-                };
-            }
-        }
-        if r > 0 {
-            m = box_blur(&m, aw, ah, r / 3 + 1);
-        }
+        let mask = ground_mask(&grounds, width, height, g, area);
         let jitter = match r {
             0 => 0.0,
             1..=9 => 0.2,
             _ => 0.35,
         };
-        for (i, b) in best.iter_mut().enumerate() {
-            let mut s = m[i];
-            if s > 0.02 {
-                s += noise_at[i] * jitter;
-            }
-            if s > b.0 {
-                *b = (s, g);
+        for py in 0..ah {
+            let y = area.y0 + py as i64;
+            for px in 0..aw {
+                let i = py * aw + px;
+                let mut s = mask.at(area.x0 + px as i64, y);
+                if s > 0.02 {
+                    s += noise_at[i] * jitter;
+                }
+                let b = &mut best[i];
+                if s > b.0 {
+                    *b = (s, g);
+                }
             }
         }
     }
@@ -1182,6 +1320,167 @@ mod tests {
                 whole.crop(x * CELL, y * CELL, CELL, CELL),
                 "cell {x},{y}"
             );
+        }
+    }
+
+    /// Any window of any map is the same pixels as that part of the whole map: random grids and
+    /// seeds, so a regression in the margin the whole map needs around a window (MARGIN) shows
+    /// up as a difference at an edge.
+    #[test]
+    fn any_window_of_any_map_is_that_part_of_the_whole_map() {
+        // A tiny xorshift, so the test needs no dependency and fails the same way every run.
+        let mut state = 0x243f_6a88_85a3_08d3u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let kinds = [
+            "plain",
+            "road",
+            "wall",
+            "gate",
+            "forest",
+            "peak",
+            "river",
+            "cliff",
+            "castle",
+            "grass",
+            "wasteland",
+            "field",
+            "house",
+            "fence",
+            "bridge",
+        ];
+        for case in 0..4 {
+            let w = 6 + (next() % 9) as usize;
+            let h = 4 + (next() % 7) as usize;
+            let cells: Vec<&str> = (0..w * h)
+                .map(|_| kinds[(next() % kinds.len() as u64) as usize])
+                .collect();
+            let seed = next() % 64;
+            let whole = render_map(&cells, w, h, seed).unwrap();
+            for _ in 0..4 {
+                let (x, y) = ((next() % w as u64) as usize, (next() % h as u64) as usize);
+                let (cw, ch) = (
+                    1 + (next() % (w - x) as u64) as usize,
+                    1 + (next() % (h - y) as u64) as usize,
+                );
+                let part = render_cells(&cells, w, h, seed, (x, y, cw, ch)).unwrap();
+                assert_eq!(
+                    part,
+                    whole.crop(x * CELL, y * CELL, cw * CELL, ch * CELL),
+                    "case {case}: {w}×{h} seed {seed}, window {x},{y} {cw}×{ch}"
+                );
+            }
+        }
+    }
+
+    /// A ground's mask computed only where it can be non-zero is the whole area's mask: random
+    /// grids, random areas and every ground, compared pixel by pixel.
+    ///
+    /// Not bit for bit: [`box_blur`]'s sliding sum ends up around 1e-8 instead of exactly 0 far
+    /// from the ground (the subtraction of values that left the window does not cancel exactly),
+    /// and a shorter row rounds differently. Both are five orders of magnitude below the 0.02 a
+    /// pixel needs to count as the ground, so the picture is unchanged.
+    #[test]
+    fn a_scoped_mask_is_the_whole_areas_mask() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let kinds = [
+            "plain",
+            "road",
+            "wall",
+            "gate",
+            "forest",
+            "peak",
+            "river",
+            "cliff",
+            "castle",
+            "grass",
+            "wasteland",
+            "field",
+            "house",
+            "fence",
+            "bridge",
+        ];
+        for case in 0..6 {
+            let (w, h) = (5 + (next() % 8) as usize, 4 + (next() % 6) as usize);
+            let cells: Vec<&str> = (0..w * h)
+                .map(|_| kinds[(next() % kinds.len() as u64) as usize])
+                .collect();
+            let grounds = Grid {
+                w,
+                h,
+                cells: &cells,
+            }
+            .grounds();
+            let area = Rect {
+                x0: 0,
+                y0: 0,
+                w: w * CELL,
+                h: h * CELL,
+            };
+            for g in GROUNDS {
+                let mask = ground_mask(&grounds, w, h, g, area);
+                let whole = whole_area_mask(&grounds, w, h, g, area);
+                for py in 0..area.h {
+                    for px in 0..area.w {
+                        let (x, y) = (px as i64, py as i64);
+                        let (a, b) = (mask.at(x, y), whole[py * area.w + px]);
+                        assert!(
+                            (a - b).abs() < 1e-6,
+                            "case {case}: {w}×{h} {g:?} at {x},{y}: {a} vs {b}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The mask of `g` over the whole area, as the renderer computed it before it was scoped to
+    /// the ground's own cells.
+    fn whole_area_mask(
+        grounds: &[Ground],
+        width: usize,
+        height: usize,
+        g: Ground,
+        area: Rect,
+    ) -> Vec<f32> {
+        let r = g.softness();
+        let c = CELL as i64;
+        let cell = |x: i64, y: i64| -> f32 {
+            let x = x.clamp(0, width as i64 - 1) as usize;
+            let y = y.clamp(0, height as i64 - 1) as usize;
+            f32::from(u8::from(grounds[y * width + x] == g))
+        };
+        let mut m = vec![0f32; area.w * area.h];
+        for py in 0..area.h {
+            let y = area.y0 + py as i64;
+            for px in 0..area.w {
+                let x = area.x0 + px as i64;
+                m[py * area.w + px] = if r == 0 {
+                    cell(x / c, y / c)
+                } else {
+                    let u = (x as f32 + 0.5) / CELL as f32 - 0.5;
+                    let v = (y as f32 + 0.5) / CELL as f32 - 0.5;
+                    let (i, j) = (u.floor() as i64, v.floor() as i64);
+                    let (fu, fv) = (u - i as f32, v - j as f32);
+                    (cell(i, j) * (1.0 - fu) + cell(i + 1, j) * fu) * (1.0 - fv)
+                        + (cell(i, j + 1) * (1.0 - fu) + cell(i + 1, j + 1) * fu) * fv
+                };
+            }
+        }
+        if r > 0 {
+            box_blur(&m, area.w, area.h, r / 3 + 1)
+        } else {
+            m
         }
     }
 

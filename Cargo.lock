@@ -348,6 +348,7 @@ dependencies = [
  "hero-core",
  "hero-import",
  "serde_json",
+ "toml",
 ]
 
 [[package]]

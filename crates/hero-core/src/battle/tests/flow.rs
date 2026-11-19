@@ -990,7 +990,7 @@ fn halve_touches_one_sides_units_on_the_map() {
     st.units[shaken].morale = 1;
     st.units[shaken].statuses = vec![confused(2)];
     let (my_hp, later_hp) = (st.units[me].hp, st.units[later].hp);
-    st.begin(&pack);
+    let ev = st.begin(&pack);
     assert_eq!(st.units[foe].hp, 50, "rounded down");
     assert_eq!(st.units[weak].hp, 1, "not below 1");
     assert_eq!(st.units[later].hp, later_hp, "not on the map yet");
@@ -1007,6 +1007,31 @@ fn halve_touches_one_sides_units_on_the_map() {
             .iter()
             .all(|&u| st.units[u].statuses.is_empty()),
         "the engine's formulas: no confusion from a morale fall"
+    );
+    // Every fall says what it took from whom, so the bars do not drop unexplained — and a unit
+    // that lost nothing (1 troop halved, already at the floor) is left out.
+    let mut halved: Vec<(UnitId, HalveStat, i32, i32)> = ev
+        .iter()
+        .filter_map(|e| match e {
+            BattleEvent::Halved {
+                unit,
+                stat,
+                from,
+                to,
+            } => Some((*unit, *stat, *from, *to)),
+            _ => None,
+        })
+        .collect();
+    halved.sort_by_key(|&(u, ..)| u);
+    assert_eq!(
+        halved,
+        [
+            (me, HalveStat::Morale, 100, 50),
+            (friend, HalveStat::Morale, 61, 30),
+            (shaken, HalveStat::Morale, 1, 0),
+            (foe, HalveStat::Hp, 101, 50),
+        ],
+        "one per unit that changed; {ev:?}"
     );
 
     // The original formulas: a fall below 30 confuses with 60 %.

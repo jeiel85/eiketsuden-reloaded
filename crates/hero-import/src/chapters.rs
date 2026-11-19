@@ -86,6 +86,49 @@ pub fn parts(scene: &Scene) -> Vec<Part> {
     out
 }
 
+/// Blocks that start a battle the conversion did not turn into one.
+///
+/// * Input: `scene`, its parts ([`parts`]) and where it is (`file`, `scene_index`, for the text).
+/// * Output: one line per block whose `begin_battle` became no [`Part::Battle`]; they go to
+///   [`Chapters::lost_battles`] and from there into the conversion's errors.
+/// * Why: a block that starts a battle but converts to a story scene plays as one told scene
+///   instead of a battle, with nothing said about it (it is how a battle went missing for ten
+///   releases, #95). Blocks the story fights in the block after their setup
+///   ([`battles::part_of_earlier_battle`]) start nothing of their own and are left alone.
+fn battles_that_never_start(
+    scene: &Scene,
+    found: &[Part],
+    file: usize,
+    scene_index: usize,
+) -> Vec<String> {
+    let fought: BTreeSet<usize> = found
+        .iter()
+        .filter_map(|p| match p {
+            Part::Battle { block, .. } => Some(*block),
+            Part::Story { .. } => None,
+        })
+        .collect();
+    scene
+        .blocks
+        .iter()
+        .enumerate()
+        .filter(|(i, b)| {
+            !fought.contains(i)
+                && !battles::part_of_earlier_battle(scene, *i)
+                && b.records
+                    .iter()
+                    .flat_map(|r| &r.code)
+                    .any(|c| c.mnemonic == "begin_battle")
+        })
+        .map(|(i, _)| {
+            format!(
+                "SNR{file} scene {scene_index} block {i}: `begin_battle` but the block became no \
+                 battle (it has no battle map or no setup); it converts as story only"
+            )
+        })
+        .collect()
+}
+
 /// A story block as a drama scene.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StoryScene {
@@ -1835,6 +1878,9 @@ pub struct Chapters {
     pub befores: BTreeMap<Place, (String, StoryScene)>,
     /// The battles that go on in another block ([`battles::has_continuation`]).
     pub continued: Vec<String>,
+    /// Blocks that start a battle the conversion did not turn into one
+    /// ([`battles_that_never_start`]); the pack conversion reports them as errors.
+    pub lost_battles: Vec<String>,
 }
 
 impl Chapters {
@@ -1865,7 +1911,10 @@ impl Chapters {
                     .and_then(|r| src.names.person_names.get(&r.trigger.word(0)).cloned())
             })
             .collect();
-        for part in parts(scene) {
+        let found = parts(scene);
+        self.lost_battles
+            .extend(battles_that_never_start(scene, &found, file, scene_index));
+        for part in found {
             let (block, leg) = match part {
                 Part::Story { block } => (block, 0),
                 Part::Battle { block, leg, .. } => (block, leg),
@@ -2436,6 +2485,65 @@ mod tests {
     fn parses(text: &str) {
         let scenes = hero_core::script::parse_drama("t.drama", &format!("== s\n{text}")).unwrap();
         assert_eq!(scenes.len(), 1);
+    }
+
+    /// A block that starts a battle but converts to no battle is reported: it would otherwise
+    /// play as a told scene, the way a battle once went missing for ten releases (#95).
+    #[test]
+    fn a_begin_battle_that_becomes_no_battle_is_reported() {
+        let scene = Scene {
+            blocks: vec![
+                // A real battle: a map and a setup.
+                block(vec![record(
+                    0,
+                    0,
+                    vec![
+                        instr("load_map", &[("map", 0x3010)]),
+                        instr("battle_setup", &[]),
+                        instr("begin_battle", &[]),
+                    ],
+                )]),
+                // A story block that starts a battle and has no map: it plays as a told scene.
+                block(vec![record(
+                    0,
+                    0,
+                    vec![
+                        instr("dialogue", &[("text", 2)]),
+                        instr("begin_battle", &[]),
+                    ],
+                )]),
+            ],
+        };
+        let found = parts(&scene);
+        assert_eq!(
+            found,
+            [
+                Part::Battle {
+                    block: 0,
+                    map: 16,
+                    leg: 0
+                },
+                Part::Story { block: 1 },
+            ]
+        );
+        let lost = battles_that_never_start(&scene, &found, 1, 2);
+        assert_eq!(lost.len(), 1, "{lost:?}");
+        assert!(lost[0].contains("block 1"), "{lost:?}");
+        assert!(lost[0].contains("begin_battle"), "{lost:?}");
+        // A scene whose every battle converts says nothing.
+        let clean = Scene {
+            blocks: vec![block(vec![record(
+                0,
+                0,
+                vec![
+                    instr("load_map", &[("map", 0x3010)]),
+                    instr("battle_setup", &[]),
+                    instr("begin_battle", &[]),
+                ],
+            )])],
+        };
+        let found = parts(&clean);
+        assert!(battles_that_never_start(&clean, &found, 1, 0).is_empty());
     }
 
     #[test]

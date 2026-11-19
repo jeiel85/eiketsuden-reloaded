@@ -359,6 +359,107 @@ pub fn any_record(store: &dyn KeyValueStore, pack_id: &str) -> bool {
     SaveSlot::all().any(|slot| !matches!(read(store, slot, pack_id), Err(SaveSlotError::Empty(_))))
 }
 
+/// How many slots of `pack_id` hold something, loadable or not.
+pub fn record_count(store: &dyn KeyValueStore, pack_id: &str) -> usize {
+    SaveSlot::all()
+        .filter(|slot| !matches!(read(store, *slot, pack_id), Err(SaveSlotError::Empty(_))))
+        .count()
+}
+
+/// Remove every record of `pack_id`: manual, quick and automatic alike. Returns how many were
+/// removed.
+///
+/// Why it is one call: tidying old records meant deleting them one by one from the save screen
+/// (the only place with a Delete), and a stale autosave or quick save is not even selectable
+/// there while saving. A slot already empty is not an error, so a retry after a partial failure
+/// finishes the job; a failing slot stops the walk and is reported, and the count says how many
+/// were removed before it.
+pub fn clear(store: &mut dyn KeyValueStore, pack_id: &str) -> Result<usize, SaveSlotError> {
+    let mut removed = 0;
+    for slot in SaveSlot::all() {
+        if matches!(read(store, slot, pack_id), Err(SaveSlotError::Empty(_))) {
+            continue;
+        }
+        match store.remove(&slot.key(pack_id)) {
+            Ok(()) => removed += 1,
+            Err(e) => {
+                return Err(SaveSlotError::Storage(e));
+            }
+        }
+    }
+    Ok(removed)
+}
+
+/// The document to carry a save to another device: its JSON text, as stored.
+///
+/// Why the stored text and not a re-serialized [`SaveGame`]: a record written by a newer game
+/// version must survive the trip unchanged (the importing game then says why it cannot open it,
+/// instead of the exporting game silently dropping the fields it does not know).
+pub fn export_text(
+    store: &dyn KeyValueStore,
+    slot: SaveSlot,
+    pack_id: &str,
+) -> Result<String, SaveSlotError> {
+    if !slot.is_valid() {
+        return Err(SaveSlotError::InvalidSlot(slot));
+    }
+    store
+        .get(&slot.key(pack_id))
+        .map_err(SaveSlotError::Storage)?
+        .ok_or(SaveSlotError::Empty(slot))
+}
+
+/// Why an imported record was refused, or which slot would receive it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Imported {
+    pub save: SaveGame,
+    /// The manual slot the record would be written into: the first one that is empty, else the
+    /// first manual slot (the caller asks before overwriting it).
+    pub slot: SaveSlot,
+}
+
+/// Read a record pasted from another device, checking it belongs to `pack_id`.
+///
+/// Input: the text (surrounding whitespace is ignored, so a paste from a mail or chat window
+/// works), the pack being played, and the slot list that decides where it would go.
+/// Output: the save and its destination slot, or why it cannot be imported.
+pub fn import_text(text: &str, pack_id: &str, slots: &[SlotInfo]) -> Result<Imported, ImportError> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(ImportError::NoText);
+    }
+    let save = SaveGame::from_json(text, pack_id)
+        // The player-facing wording (`다른 데이터 팩의 기록입니다`, `새 버전의 기록입니다` …), not
+        // the developer message of the core error.
+        .map_err(|e| ImportError::Refused(SaveSlotError::Save(e).to_string()))?;
+    let free = slots
+        .iter()
+        .find(|info| matches!(info.slot, SaveSlot::Manual(_)) && info.status == SlotStatus::Empty)
+        .map(|info| info.slot);
+    let slot = free.unwrap_or(SaveSlot::Manual(1));
+    Ok(Imported { save, slot })
+}
+
+/// Why a pasted record could not be imported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportError {
+    /// The clipboard had nothing that looks like a record.
+    NoText,
+    /// The text is not a record of this pack, or is too new / unreadable (the reason in words).
+    Refused(String),
+}
+
+impl fmt::Display for ImportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ImportError::NoText => write!(f, "클립보드에 기록이 없습니다"),
+            ImportError::Refused(why) => write!(f, "기록을 가져올 수 없습니다: {why}"),
+        }
+    }
+}
+
+impl std::error::Error for ImportError {}
+
 /// Longest reason of a newer save ([`SaveError::TooNew`]) shown, in characters: it comes from
 /// the save file. With the words around it the message should stay within the load screen's
 /// detail panel (two lines; the reasons of this game's layouts fit one).
@@ -730,5 +831,111 @@ mod tests {
         assert!(SaveSlotError::Empty(SaveSlot::Auto)
             .to_string()
             .contains("자동 기록"));
+    }
+
+    /// Clearing removes every record of the pack — the autosave and the quick saves included,
+    /// which the save screen cannot even write into — and nothing of another pack.
+    #[test]
+    fn clearing_takes_every_record_of_the_pack_and_no_other() {
+        let mut store = MemoryStore::default();
+        write(&mut store, SaveSlot::Auto, &save("자동", 100, "base")).unwrap();
+        write(&mut store, SaveSlot::Quick(2), &save("순간", 200, "base")).unwrap();
+        write(&mut store, SaveSlot::Manual(3), &save("기록", 300, "base")).unwrap();
+        store
+            .set(&SaveSlot::Manual(7).key("base"), "garbage")
+            .unwrap();
+        write(&mut store, SaveSlot::Auto, &save("다른 팩", 400, "other")).unwrap();
+
+        assert_eq!(record_count(&store, "base"), 4);
+        assert_eq!(clear(&mut store, "base").unwrap(), 4);
+        assert_eq!(record_count(&store, "base"), 0);
+        assert!(!any(&store, "base"));
+        assert!(!any_record(&store, "base"));
+        // Another pack's saves are its own.
+        assert_eq!(record_count(&store, "other"), 1);
+        assert_eq!(
+            read(&store, SaveSlot::Auto, "other").unwrap().label,
+            "다른 팩"
+        );
+        // Nothing left to clear is not a failure.
+        assert_eq!(clear(&mut store, "base").unwrap(), 0);
+    }
+
+    /// A save travels as the text it was stored as: a record a newer game wrote keeps its own
+    /// fields, so the importing game can say what it would need instead of losing them.
+    #[test]
+    fn a_record_travels_as_the_text_it_was_stored_as() {
+        let mut store = MemoryStore::default();
+        let json = save("탁현", 100, "base").to_json();
+        write(&mut store, SaveSlot::Manual(2), &save("탁현", 100, "base")).unwrap();
+        assert_eq!(
+            export_text(&store, SaveSlot::Manual(2), "base").unwrap(),
+            json
+        );
+        assert!(matches!(
+            export_text(&store, SaveSlot::Manual(1), "base"),
+            Err(SaveSlotError::Empty(SaveSlot::Manual(1)))
+        ));
+
+        // A newer record: the fields this game does not know stay in the text.
+        let newer = format!(
+            r#"{{"version":{},"pack_id":"base","label":"새 기록","future":42}}"#,
+            SAVE_VERSION + 1
+        );
+        store.set(&SaveSlot::Manual(4).key("base"), &newer).unwrap();
+        assert_eq!(
+            export_text(&store, SaveSlot::Manual(4), "base").unwrap(),
+            newer
+        );
+    }
+
+    /// A pasted record goes into the first empty manual slot, else the first manual slot (the
+    /// caller asks before overwriting); trimming lets it arrive from a mail or chat window.
+    #[test]
+    fn an_imported_record_takes_the_first_free_manual_slot() {
+        let mut store = MemoryStore::default();
+        write(&mut store, SaveSlot::Manual(1), &save("하나", 100, "base")).unwrap();
+        write(&mut store, SaveSlot::Manual(2), &save("둘", 200, "base")).unwrap();
+        let slots = list(&store, "base");
+        let text = format!("\n  {}\n\n", save("가져옴", 300, "base").to_json());
+
+        let imported = import_text(&text, "base", &slots).unwrap();
+        assert_eq!(imported.save.label, "가져옴");
+        assert_eq!(imported.slot, SaveSlot::Manual(3));
+        write(&mut store, imported.slot, &imported.save).unwrap();
+        assert_eq!(
+            read(&store, SaveSlot::Manual(3), "base").unwrap().label,
+            "가져옴"
+        );
+
+        // With every manual slot taken, the first one is offered (the caller confirms).
+        for n in 3..=MANUAL_SLOTS {
+            write(&mut store, SaveSlot::Manual(n), &save("참", 300, "base")).unwrap();
+        }
+        let slots = list(&store, "base");
+        let imported = import_text(&text, "base", &slots).unwrap();
+        assert_eq!(imported.slot, SaveSlot::Manual(1));
+    }
+
+    /// Text that is not this pack's record is refused with the reason, never half-imported.
+    #[test]
+    fn an_import_refuses_what_it_cannot_play() {
+        let store = MemoryStore::default();
+        let slots = list(&store, "base");
+        assert_eq!(
+            import_text("   \n ", "base", &slots),
+            Err(ImportError::NoText)
+        );
+        assert!(matches!(
+            import_text("not a save", "base", &slots),
+            Err(ImportError::Refused(_))
+        ));
+        let denied = import_text(&save("x", 1, "other").to_json(), "base", &slots).unwrap_err();
+        assert!(denied.to_string().contains("다른 데이터 팩"), "{denied}");
+        let newer = format!(r#"{{"version":{},"pack_id":"base"}}"#, SAVE_VERSION + 1);
+        assert!(matches!(
+            import_text(&newer, "base", &slots),
+            Err(ImportError::Refused(_))
+        ));
     }
 }

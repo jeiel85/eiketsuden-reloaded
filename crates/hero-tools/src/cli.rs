@@ -20,13 +20,16 @@ USAGE:
         command line error (exit 2).
 
     hero-tools simulate <pack_dir> --campaign [--seeds N] [--choose SCENE=N[,N...]]...
-                             [--level-bonus N] [--trace ID]
+                             [--from NODE] [--level-bonus N] [--trace ID]
                              [--difficulty easy|normal|hard] [--extended-rules]
         Play the whole campaign from a new game N times (default 4), AI against AI, carrying
         levels, recruits, items and flags from battle to battle: dramas run with their side
         effects, camps buy battle items (until 8 are in hand) and keep the camp screen's first
         selection, the player's units go for the battle's goal (an officer who must reach a
         tile marches for it), a lost battle follows its on_defeat or ends the run.
+        --from NODE starts at that campaign node instead of the new game's first one, giving the
+        army the officers the battles from there on name, at their starting levels (a check of a
+        late chapter's battles at campaign level).
         --level-bonus N gives every army officer N levels once, before their first battle
         (a check of how far a stronger army gets, not of the balance). --trace ID writes every
         phase of battle ID to stderr (per seed: each unit's side, tile, HP and AI).
@@ -255,6 +258,7 @@ fn parse_simulate(rest: &[String]) -> Result<Command, String> {
     let mut choose = std::collections::BTreeMap::new();
     let mut level_bonus = None;
     let mut trace = None;
+    let mut from = None;
     let mut game: Option<hero_core::campaign::GameOptions> = None;
     let mut args = rest.iter();
     while let Some(arg) = args.next() {
@@ -280,6 +284,7 @@ fn parse_simulate(rest: &[String]) -> Result<Command, String> {
             }
             "--battle" => battle = Some(value("a battle id")?),
             "--trace" => trace = Some(value("a battle id")?),
+            "--from" => from = Some(value("a campaign node id")?),
             "--level-bonus" => {
                 let v = value("a number")?;
                 level_bonus =
@@ -349,6 +354,7 @@ fn parse_simulate(rest: &[String]) -> Result<Command, String> {
             seeds,
             choose,
             options: crate::campaign_sim::Options {
+                from,
                 level_bonus: level_bonus.unwrap_or(0),
                 trace,
                 game: game.unwrap_or_default(),
@@ -357,6 +363,9 @@ fn parse_simulate(rest: &[String]) -> Result<Command, String> {
     }
     if !choose.is_empty() {
         return Err("`--choose` needs `--campaign`".into());
+    }
+    if from.is_some() {
+        return Err("`--from` needs `--campaign`".into());
     }
     if level_bonus.is_some() {
         return Err("`--level-bonus` needs `--campaign`".into());
@@ -477,6 +486,29 @@ mod tests {
                 "simulate",
                 "p",
                 "--campaign",
+                "--from",
+                "chapter4_battle",
+                "--level-bonus",
+                "3",
+                "--trace=b01"
+            ]),
+            Ok(Command::SimulateCampaign {
+                pack: "p".into(),
+                seeds: DEFAULT_SEEDS,
+                choose: Default::default(),
+                options: crate::campaign_sim::Options {
+                    from: Some("chapter4_battle".into()),
+                    level_bonus: 3,
+                    trace: Some("b01".into()),
+                    ..Default::default()
+                },
+            })
+        );
+        assert_eq!(
+            parse_str(&[
+                "simulate",
+                "p",
+                "--campaign",
                 "--difficulty=hard",
                 "--extended-rules"
             ]),
@@ -502,6 +534,14 @@ mod tests {
             (
                 &["simulate", "p", "--trace", "b"][..],
                 "`--trace` needs `--campaign`",
+            ),
+            (
+                &["simulate", "p", "--from", "n"][..],
+                "`--from` needs `--campaign`",
+            ),
+            (
+                &["simulate", "p", "--campaign", "--from"][..],
+                "needs a campaign node id",
             ),
             (
                 &["simulate", "p", "--campaign", "--trace"][..],

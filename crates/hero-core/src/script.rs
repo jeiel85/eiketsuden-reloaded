@@ -37,6 +37,14 @@ pub enum Slot {
 /// original picks its sky and ground strips; a plain stage outside a battle or without it.
 pub const DUEL_TERRAIN: &str = "terrain";
 
+/// The longest pause `@wait` may ask for, in milliseconds.
+///
+/// A pause is a beat between lines. Ten seconds is far longer than any beat the story needs and
+/// short enough that a hand-edited or corrupted quick save cannot park the player in a scene they
+/// can only leave by skipping it; the parser refuses longer scripts and the drama screen clamps
+/// a longer saved value the same way ([`crate::screens::drama`]).
+pub const MAX_WAIT_MS: u32 = 10_000;
+
 /// One side of a duel (`@duel`): the fighter on the left or on the right.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DuelSide {
@@ -561,10 +569,21 @@ impl Parser<'_> {
                     self.err(line, "@hide takes left, center, right or all")
                 })?)),
             },
-            "wait" => Cmd::Wait(
-                arg.parse()
-                    .map_err(|_| self.err(line, "@wait needs milliseconds as a number"))?,
-            ),
+            "wait" => {
+                let ms: u32 = arg
+                    .parse()
+                    .map_err(|_| self.err(line, "@wait needs milliseconds as a number"))?;
+                // A pause is a beat between lines, not a way to park the player: a scene that
+                // waits longer than this is a mistake (or a corrupted save, which the frontend
+                // clamps the same way).
+                if ms > MAX_WAIT_MS {
+                    return Err(self.err(
+                        line,
+                        format!("@wait takes at most {MAX_WAIT_MS} milliseconds"),
+                    ));
+                }
+                Cmd::Wait(ms)
+            }
             "fade" => match arg {
                 "out" => Cmd::FadeOut,
                 "in" => Cmd::FadeIn,
@@ -910,6 +929,18 @@ liu_bei: 어지러운 세상이로구나.
         assert!(parse_drama("t", "== a\n@choice\n@end\n").is_err());
         assert!(parse_drama("t", "== a\n@wait soon\n").is_err());
         assert!(parse_drama("t", "== a\n    orphan continuation\n").is_err());
+    }
+
+    /// A pause is a beat, not a way to park the player: `@wait` above the cap is a script error.
+    #[test]
+    fn a_wait_has_a_cap() {
+        assert_eq!(
+            parse_drama("t", "== a\n@wait 10000\n").unwrap()[0].cmds[0],
+            Cmd::Wait(MAX_WAIT_MS)
+        );
+        let err = parse_drama("t", "== a\n@wait 10001\n").unwrap_err();
+        assert!(err.msg.contains("at most"), "{err}");
+        assert!(parse_drama("t", "== a\n@wait 0\n").is_ok());
     }
 
     #[test]

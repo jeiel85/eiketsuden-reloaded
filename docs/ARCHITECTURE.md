@@ -56,6 +56,9 @@ is developed (and how it differs from OpenRCT2's decompilation route) is in [ENG
    added after a victory only.
 5. **Saving** — `SaveGame` (versioned JSON) holds the campaign and an optional battle in progress.
    Natively saves live in the user data directory; on the web in `localStorage` (via `web/hero_web.js`).
+   The save screen can also carry a record between devices through the system clipboard
+   (`platform/clipboard.rs`, `saves::export_text` / `import_text`; D29) and clear every record of a
+   pack at once (`saves::clear`).
 
 ## Layered packs
 

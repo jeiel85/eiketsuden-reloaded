@@ -19,7 +19,7 @@ use super::sprites::{FxDef, Pose};
 use super::text;
 use crate::audio::sfx;
 use hero_core::battle::{BattleEvent, BattleState, StrategyHit, Unit, UnitId, Weather};
-use hero_core::battledef::Side;
+use hero_core::battledef::{HalveStat, Side};
 use hero_core::data::StatusKind;
 use hero_core::geom::{Dir, Pos};
 use hero_core::pack::Pack;
@@ -499,6 +499,8 @@ pub enum BeatKind {
         scroll: bool,
     },
     Regen(Vec<(UnitId, i32, i32, i32)>),
+    /// A `halve` event drained one side's troops or morale, unit by unit.
+    Halved(Vec<(UnitId, HalveStat, i32)>),
     Confused(UnitId),
     Recovered(UnitId),
     Exp(Vec<(UnitId, u32)>),
@@ -684,6 +686,23 @@ pub fn plan(
                     continue;
                 }
                 BeatKind::Regen(vec![entry])
+            }
+            BattleEvent::Halved {
+                unit,
+                stat,
+                from,
+                to,
+            } => {
+                let entry = (*unit, *stat, to - from);
+                if let Some(Beat {
+                    kind: BeatKind::Halved(list),
+                    ..
+                }) = beats.last_mut()
+                {
+                    list.push(entry);
+                    continue;
+                }
+                BeatKind::Halved(vec![entry])
             }
             BattleEvent::Confused { unit } => BeatKind::Confused(*unit),
             BattleEvent::StatusExpired { unit, .. } => BeatKind::Recovered(*unit),
@@ -1270,6 +1289,32 @@ fn step(
             apply_drains(drains, scene, t / DRAIN_SECONDS);
             t >= 0.8
         }
+        BeatKind::Halved(list) => {
+            if first {
+                let mut any_hp = false;
+                for &(u, stat, delta) in list.iter() {
+                    match stat {
+                        HalveStat::Hp => {
+                            scene.float(u, format!("병력 {delta}"), FloatKind::Hit);
+                            drain(drains, scene, u, delta as f32);
+                            any_hp = true;
+                        }
+                        HalveStat::Morale => {
+                            scene.float(u, text::morale_text(delta), FloatKind::Morale);
+                            let v = &mut scene.views[u];
+                            v.morale = (v.morale + delta).clamp(0, 100);
+                        }
+                    }
+                }
+                cues.push(Cue::Sfx(if any_hp {
+                    sfx::HIT_HEAVY
+                } else {
+                    sfx::MORALE_DOWN
+                }));
+            }
+            apply_drains(drains, scene, t / DRAIN_SECONDS);
+            t >= 0.8
+        }
         BeatKind::Confused(u) => {
             if first {
                 let at = scene.views[*u].pos;
@@ -1482,6 +1527,52 @@ mod tests {
         assert_eq!(knockback(300), 6.0);
         assert!(knockback(600) > knockback(400));
         assert_eq!(knockback(100_000), 16.0);
+    }
+
+    /// A `halve` event shows what it took: red troop numbers (the bar draining) or a morale
+    /// figure, grouped into one beat for the whole side.
+    #[test]
+    fn a_halving_says_what_it_took_from_each_unit() {
+        let (pack, state) = testutil::sishui();
+        let foe = state
+            .units
+            .iter()
+            .position(|u| u.side == Side::Enemy)
+            .unwrap();
+        let ev = vec![
+            BattleEvent::Halved {
+                unit: foe,
+                stat: HalveStat::Hp,
+                from: 200,
+                to: 100,
+            },
+            BattleEvent::Halved {
+                unit: foe,
+                stat: HalveStat::Morale,
+                from: 100,
+                to: 50,
+            },
+        ];
+        let beats = plan(&ev, &state, &pack, &BTreeMap::new());
+        assert_eq!(beats.len(), 1, "one beat for the one side");
+        assert!(
+            matches!(&beats[0].kind, BeatKind::Halved(l) if l.len() == 2),
+            "{:?}",
+            beats[0].kind
+        );
+
+        // Playing it drains the HP bar and takes the morale down with it.
+        let mut scene = Scene::new(&state);
+        let (hp, morale) = (scene.views[foe].hp, scene.views[foe].morale);
+        let mut player = EventPlayer::default();
+        player.push(beats);
+        let mut cues = Vec::new();
+        run(&mut player, &mut scene, &mut cues, 600);
+        assert_eq!(scene.views[foe].hp, hp - 100.0, "the troop bar drained");
+        assert_eq!(scene.views[foe].morale, morale - 50, "the morale bar fell");
+        assert!(cues.contains(&Cue::Sfx(sfx::HIT_HEAVY)));
+        let texts: Vec<&str> = scene.floats.iter().map(|f| f.text.as_str()).collect();
+        assert!(texts.contains(&"병력 -100"), "{texts:?}");
     }
 
     #[test]

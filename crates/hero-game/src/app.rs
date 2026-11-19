@@ -46,6 +46,25 @@ pub const FADE_SECONDS: f32 = 0.18;
 /// Longest frame time fed to the game (avoids huge jumps after a stall).
 pub const MAX_FRAME_TIME: f32 = 0.1;
 
+/// The new art's battle-map pictures (D27) in this launch's converted original-mode pack.
+///
+/// The game converts the original mode at every launch (`PackOptions::remake_maps`) and draws the
+/// new maps only while the "그림" setting asks for the new art, so choosing 새 그림 mid-launch
+/// leaves them for the next launch — unless the conversion could not draw them at all, which a
+/// restart would not fix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RemakeMaps {
+    /// Every map picture is there (or there is no original-mode pack to speak of).
+    #[default]
+    Ready,
+    /// The conversion left them out: the setting asked for the original art when it ran, so the
+    /// next launch, with 새 그림, draws them.
+    NotDrawn,
+    /// The conversion ran with the pictures asked for and could not draw them (or there was no
+    /// readable map to draw): the "maps" report says why, and a restart does not change it.
+    Failed,
+}
+
 /// Everything screens share. Created once at startup.
 pub struct Ctx {
     pub gfx: Gfx,
@@ -69,10 +88,9 @@ pub struct Ctx {
     /// Seconds since startup.
     pub time: f64,
     pub frame: u64,
-    /// The original mode was converted at this launch without the new art's maps (the "그림"
-    /// setting was 원작, D27): choosing 새 그림 now changes the units, and the maps at the next
-    /// launch.
-    pub remake_maps_missing: bool,
+    /// The new art's battle maps in this launch's converted original-mode pack (D27): whether
+    /// choosing 새 그림 mid-launch has to wait for a restart, or the pictures are missing for good.
+    pub remake_maps: RemakeMaps,
 }
 
 impl Ctx {
@@ -101,7 +119,7 @@ impl Ctx {
             music: None,
             time: 0.0,
             frame: 0,
-            remake_maps_missing: false,
+            remake_maps: RemakeMaps::Ready,
         }
     }
 
@@ -300,6 +318,7 @@ impl App {
             session.tick(dt);
         }
         self.global_keys();
+        self.report_media_failures();
 
         match std::mem::replace(&mut self.fade, Fade::Idle) {
             Fade::Out { t, pending } => {
@@ -349,6 +368,14 @@ impl App {
             self.handle(Transition::push(
                 crate::screens::controls::ControlsScreen::overlay(),
             ));
+            return;
+        }
+        // While the controls list is up, the keys it lists are being tried out, not fired at the
+        // game underneath: a player reading F5's line and pressing it should not save the game
+        // they were only looking up the keys for. Only F1 (above, handled by the list itself)
+        // and closing the list stay live.
+        if self.stack.last().is_some_and(|s| s.name() == "controls") {
+            return;
         }
         if is_key_pressed(KeyCode::F3) {
             self.show_fps = !self.show_fps;
@@ -373,6 +400,38 @@ impl App {
             self.ctx.sfx(sfx::CURSOR);
             self.ctx.toast(format!("F5·F9: {}", slot.name()));
         }
+    }
+
+    /// Say what media failed to load after the game started.
+    ///
+    /// The loading screen reports the failures of its own startup wait ([`Media::take_failures`]
+    /// clears the list as it goes), so this one only speaks for what failed later: a picture or
+    /// sound a scene asks for minutes in, or the media of a pack swapped under a running game. The
+    /// store already logs each key and draws a fallback; without this line the player would only
+    /// see the fallback and never learn why.
+    fn report_media_failures(&mut self) {
+        // While the loading screen is on the stack it does the reporting (the app's report would
+        // otherwise take the list before the screen's own, at the end of the media wait).
+        if self.stack.iter().any(|s| s.name() == "loading") {
+            return;
+        }
+        let failed = self.ctx.media.take_failures();
+        if failed.is_empty() {
+            return;
+        }
+        macroquad::logging::warn!("media: {} files failed to load", failed.len());
+        let mut shown = failed
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        if failed.len() > 3 {
+            shown.push_str(&format!(" 외 {}개", failed.len() - 3));
+        }
+        self.ctx.toast(format!(
+            "불러오지 못한 파일이 있습니다: {shown} (기본 그림·소리로 표시합니다)"
+        ));
     }
 
     /// Write the quick save slot. Ignored during a fade (the stack is about to change and would

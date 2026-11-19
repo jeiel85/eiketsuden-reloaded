@@ -1053,7 +1053,7 @@ caught; write free names in Korean or with a capital letter.
 | `@sfx <key>` | Play sound `sfx/<key>.ogg` or `.wav`. |
 | `@show <who> <left\|center\|right>` | Show a portrait in a slot (`l`, `c`, `r` also work). `who` is an officer id or display name (their portrait key is used), otherwise it is taken as a portrait key itself. |
 | `@hide <left\|center\|right\|all>` | Hide one slot, or every slot (`@hide` alone = all). |
-| `@wait <ms>` | Pause. |
+| `@wait <ms>` | Pause, at most 10000 ms (10 s). |
 | `@fade out` / `@fade in` | Fade the screen. |
 | `@title <text>` | Large centred caption (chapter titles). |
 | `@narr <text>` | Narration box without speaker. |
@@ -1295,7 +1295,12 @@ hero-tools --help | --version
   player's units pointed at the battle's goal (an officer a `reach` victory names advances to the
   nearest tile of its area they can enter; a `defeat_unit` victory sends the others after that unit; a
   unit the battle gives another AI than the army's keeps it), and a defeat follows the battle's
-  `on_defeat` or ends the run (game over). `--level-bonus N` gives every army officer N levels once,
+  `on_defeat` or ends the run (game over). `--from NODE` starts the runs at that campaign node instead of
+  a new game's first one, with the army the battles from there on name (their required officers and the
+  officers their conditions and events name, joined at their `officers.toml` levels — the levels the
+  earlier chapters would have earned are what `--level-bonus` stands in for), so a late chapter's battles
+  can be checked at campaign level rather than at a new game's. An unknown node is a command line error
+  (exit 2). `--level-bonus N` gives every army officer N levels once,
   before their first battle: a check of how far a stronger army gets, not of the balance. `--trace ID`
   writes every phase of battle `ID` (each unit's side, tile, HP and AI) and its outcome to stderr, each
   line with its seed; a battle the pack does not have is a command line error (exit 2).
