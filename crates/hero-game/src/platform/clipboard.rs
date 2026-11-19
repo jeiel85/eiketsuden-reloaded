@@ -40,8 +40,10 @@ enum Job {
     /// read blocks; the variant is compiled everywhere so its handling is tested on any host).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Running(Receiver<Result<Option<String>, String>>),
-    /// A read that answered at once (the native clipboard does).
+    /// A read that answered at once (the native clipboard does, except on Linux where the
+    /// read runs on a worker; the variant stays compiled so its handling is tested on any host).
     #[cfg(not(target_arch = "wasm32"))]
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     Read(Result<Option<String>, String>),
     /// A write with nothing to wait for (the native clipboard reports no failure).
     #[cfg(not(target_arch = "wasm32"))]
