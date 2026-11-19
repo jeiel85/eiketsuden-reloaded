@@ -65,6 +65,7 @@ use crate::screens::settings::SettingsScreen;
 use crate::ui::dialog::{ConfirmDialog, ConfirmEvent};
 use crate::ui::menu::{Menu, MenuEvent, MenuItem};
 use crate::ui::theme;
+use crate::ui::tooltip::{draw_tooltip, HoverTimer};
 use crate::ui::window::{draw_highlight, draw_icon, draw_window, draw_window_ex, WindowStyle};
 use anim::{Cue, EventPlayer, Scene};
 use camera::{edge_direction, Camera, EDGE_PAN_SPEED};
@@ -112,6 +113,35 @@ enum FrameButton {
     Enemies,
 }
 
+impl FrameButton {
+    /// The frame's buttons in drawing order.
+    const ALL: [FrameButton; 3] = [FrameButton::Menu, FrameButton::Allies, FrameButton::Enemies];
+
+    /// Number the hover timer tracks this button by.
+    fn id(self) -> u64 {
+        match self {
+            FrameButton::Menu => 0,
+            FrameButton::Allies => 1,
+            FrameButton::Enemies => 2,
+        }
+    }
+
+    /// The button an id from [`FrameButton::id`] names.
+    fn from_id(id: u64) -> Option<FrameButton> {
+        FrameButton::ALL.into_iter().find(|b| b.id() == id)
+    }
+
+    /// What the button does, for its tooltip: the frame's buttons carry no label, so a player who
+    /// has not clicked them yet has nothing but the picture to go by.
+    fn tooltip(self) -> &'static str {
+        match self {
+            FrameButton::Menu => "전투 메뉴 — 턴 종료, 부대 일람, 승리 조건, 저장, 설정",
+            FrameButton::Allies => "아군 부대 일람",
+            FrameButton::Enemies => "적군 부대 일람",
+        }
+    }
+}
+
 /// The frame's buttons with their areas.
 fn frame_buttons(f: &BattleFrame) -> impl Iterator<Item = (FrameButton, Rect)> {
     [
@@ -137,6 +167,35 @@ const AI_PAUSE: f32 = 0.3;
 const FAST_FORWARD: f32 = 3.0;
 /// Seconds after the last player unit acted before the phase ends by itself.
 const AUTO_END_DELAY: f32 = 0.4;
+
+/// Whether the auto end may run now: the player asked for it (settings), the phase is the
+/// player's, nothing is waiting for a choice, and no unit is left to act.
+///
+/// Split from the timer so both halves of the rule can be tested without a screen.
+fn auto_end_armed(auto_end_turn: bool, mode: &Mode, state: &BattleState) -> bool {
+    auto_end_turn
+        && *mode == Mode::Browse
+        && state.phase == Side::Player
+        && player::cycle_actor(state, None, 1).is_none()
+}
+
+/// Advance the idle timer by `dt`: `true` on the frame the phase should end by itself.
+///
+/// The timer only runs while [`auto_end_armed`]; any frame it does not (a menu opened, a unit
+/// got an action back, the player turned the setting off) resets it, so a phase never ends the
+/// instant the last unit finishes because of time gathered earlier.
+fn auto_end_step(idle: &mut f32, dt: f32, armed: bool) -> bool {
+    if !armed {
+        *idle = 0.0;
+        return false;
+    }
+    *idle += dt;
+    if *idle >= AUTO_END_DELAY {
+        *idle = 0.0;
+        return true;
+    }
+    false
+}
 
 /// Metadata files of the battle art, loaded when the screen opens.
 #[derive(Default)]
@@ -336,9 +395,16 @@ pub struct BattleScreen {
     /// into [`MapRenderer`], so a change in the settings overlay reloads it
     /// ([`BattleScreen::follow_art_setting`]). `None` until a picture is used.
     picture_art: Option<crate::settings::ArtStyle>,
+    /// A picture was asked for again after the setting changed and the map is still drawn by
+    /// the renderer of the previous choice, until the new picture has loaded (or is found
+    /// missing) and the map can be remounted without a blank floor.
+    remount_art: bool,
     /// Tiles the enemies could attack next phase (the "위험 범위" view option, D25 X4) with the
     /// [`player::danger_key`] they were computed for; refreshed only when that changes.
     danger: Option<(Vec<i64>, Vec<Pos>)>,
+    /// The battle frame's button the pointer has rested on, for its tooltip (the buttons carry
+    /// no label).
+    hover: HoverTimer,
 }
 
 impl BattleScreen {
@@ -485,7 +551,9 @@ impl BattleScreen {
             map_stale: false,
             replay_terrain: None,
             picture_art: None,
+            remount_art: false,
             danger: None,
+            hover: HoverTimer::default(),
             state,
         }
     }
@@ -622,6 +690,16 @@ impl BattleScreen {
             self.map_stale = false;
             self.map = MapRenderer::new(&self.state.map, self.map.tile);
         }
+        // The "그림" setting changed: the old renderer keeps drawing the map until the new
+        // picture has loaded (or is found missing), so the frames a texture takes to decode do
+        // not show a bare floor.
+        if self.remount_art {
+            if !self.art_remount_ready(&|key| ctx.media.texture_state(key)) {
+                return;
+            }
+            self.map = MapRenderer::new(&self.state.map, self.map.tile);
+            self.remount_art = false;
+        }
         if !self.map.is_built() && self.meta.tileset_req.is_none() {
             // The tile size is known now (the tileset's, or the default without one), so the
             // picture layer can be checked against the map; one that is missing or does not
@@ -683,18 +761,34 @@ impl BattleScreen {
     /// The "그림" setting changed since the map's picture layer was loaded (in the settings
     /// overlay): load the picture of the new choice. The cell pictures and units follow by
     /// themselves, because they are fetched from the media store every frame.
+    ///
+    /// The renderer keeps the old picture (and the map keeps drawing) until the new one has
+    /// loaded: rebuilding it at once would show a bare floor for the frames the texture takes
+    /// to decode ([`BattleScreen::remount_art`]).
     fn follow_art_setting(&mut self, art: crate::settings::ArtStyle) {
         if self.picture_art.is_none_or(|used| used == art) {
             return;
         }
         self.picture_art = None;
-        self.map = MapRenderer::new(&self.state.map, self.map.tile);
+        self.remount_art = true;
         self.meta.picture = self
             .def()
             .map
             .image
             .as_ref()
             .map(|key| format!("maps/{key}"));
+    }
+
+    /// Whether the map can start over for a new "그림" setting now: the picture the new choice
+    /// asks for is not still loading.
+    ///
+    /// * Input: `state` gives a texture's load state (the media store's).
+    /// * Output: `true` when the new picture is ready or missing, or when the map has none.
+    fn art_remount_ready(&self, state: &dyn Fn(&str) -> AssetState) -> bool {
+        self.meta
+            .picture
+            .as_deref()
+            .is_none_or(|key| state(key) != AssetState::Loading)
     }
 
     /// Size of a map tile in virtual pixels (the tileset's `tile_size`).
@@ -1571,18 +1665,9 @@ impl BattleScreen {
 
         // Everyone has acted: end the phase by itself (unless the player turned that off in the
         // settings, so they can look around the map first).
-        if ctx.settings.auto_end_turn
-            && self.ui.mode == Mode::Browse
-            && self.state.phase == Side::Player
-            && player::cycle_actor(&self.state, None, 1).is_none()
-        {
-            self.idle_time += dt;
-            if self.idle_time >= AUTO_END_DELAY {
-                self.idle_time = 0.0;
-                self.apply(ctx, Action::EndPhase);
-            }
-        } else {
-            self.idle_time = 0.0;
+        let armed = auto_end_armed(ctx.settings.auto_end_turn, &self.ui.mode, &self.state);
+        if auto_end_step(&mut self.idle_time, dt, armed) {
+            self.apply(ctx, Action::EndPhase);
         }
         Transition::None
     }
@@ -1875,8 +1960,9 @@ impl Screen for BattleScreen {
                         // Event conditions see what the scene's `@set` changed, and so does a
                         // save made before the next action (it writes the session's battle).
                         if let Some(session) = ctx.session.as_ref() {
-                            self.state.take_scene_flags(&session.campaign.flags);
-                            self.store_session(ctx);
+                            if return_from_drama(&mut self.state, &session.campaign.flags) {
+                                self.store_session(ctx);
+                            }
                         }
                         self.events.resume();
                     }
@@ -1958,14 +2044,9 @@ impl Screen for BattleScreen {
                     );
                 }
                 // The button under the mouse lights up while the buttons can be used (touch
-                // leaves no pointer over them).
-                let usable = player_turn
-                    && matches!(self.panel, Panel::None)
-                    && self.dialog.is_none()
-                    && self.waiting.is_none()
-                    && self.mode_menu.is_none()
-                    && matches!(self.ui.mode, Mode::Browse)
-                    && !self.touch_seen;
+                // leaves no pointer over them); its tooltip is drawn with the other overlays,
+                // above the windows the frame shares the canvas with.
+                let usable = self.frame_buttons_usable();
                 if let Some(p) = ctx.input.pointer().filter(|_| usable) {
                     if let Some((_, r)) = frame_buttons(f).find(|(_, r)| r.contains(p)) {
                         draw_highlight(r, false, ctx.time);
@@ -2047,6 +2128,15 @@ impl Screen for BattleScreen {
             fill_rect(screen, Color::new(0.0, 0.0, 0.0, 0.35));
             dialog.draw(ctx);
         }
+        // The frame's button tooltip last, above the windows it shares the canvas with.
+        if self.hover.visible() {
+            if let (Some(button), Some(p)) = (
+                self.hover.target().and_then(FrameButton::from_id),
+                ctx.input.pointer(),
+            ) {
+                draw_tooltip(&ctx.gfx, button.tooltip(), p);
+            }
+        }
         if !self.events.is_idle()
             && self.state.phase != Side::Player
             && self.scene.outcome.is_none()
@@ -2107,6 +2197,19 @@ impl BattleScreen {
     }
 }
 
+/// Takes in what a scene shown over the battle changed, when the scene closes.
+///
+/// * Input: the battle `state` (mutated) and the campaign's flags now.
+/// * Output: whether the scene changed anything in the battle.
+/// * Why a function: the return from a drama overlay to the battle (`Enter::Resumed`) needs a
+///   `Ctx`, so its logic is here where it can be tested; the caller writes the session only
+///   when something changed.
+fn return_from_drama(state: &mut BattleState, campaign: &BTreeMap<String, i64>) -> bool {
+    let before = state.flags.clone();
+    state.take_scene_flags(campaign);
+    state.flags != before
+}
+
 /// Whether a saved [`BattleReplay`] can be played against `state`: the same battle and the
 /// same units (the replay's views are indexed like the state's).
 fn fits_replay(r: &BattleReplay, state: &BattleState) -> bool {
@@ -2130,16 +2233,28 @@ fn replay_scenes(r: &BattleReplay) -> Vec<String> {
 /// * Output: the replay when it fits the state ([`fits_replay`]) and the pending scenes end with
 ///   its scenes, which are then taken out (they play with it); else no replay and the pending
 ///   scenes as saved, so the scenes are shown once either way.
+///
+/// Why a discarded replay is logged: the save then loads as if the interrupted animation had
+/// finished, and the only trace otherwise is a battle that looks one step further along.
 fn take_replay_scenes(
     mut pending: Vec<String>,
     replay: Option<BattleReplay>,
     state: &BattleState,
 ) -> (Vec<String>, Option<BattleReplay>) {
-    let Some(r) = replay.filter(|r| fits_replay(r, state)) else {
+    let Some(r) = replay else {
         return (pending, None);
     };
+    if !fits_replay(&r, state) {
+        macroquad::logging::warn!(
+            "the saved battle animation does not fit this battle (another pack?); it is not replayed"
+        );
+        return (pending, None);
+    }
     let scenes = replay_scenes(&r);
     if !pending.ends_with(&scenes) {
+        macroquad::logging::warn!(
+            "the saved battle animation's scenes are not among the queued ones; it is not replayed"
+        );
         return (pending, None);
     }
     pending.truncate(pending.len() - scenes.len());
@@ -2147,6 +2262,21 @@ fn take_replay_scenes(
 }
 
 impl BattleScreen {
+    /// Whether the battle frame's buttons react to the pointer this frame: the player's turn is
+    /// idle under no window, and touch play has not taken over (there is no hover on touch).
+    fn frame_buttons_usable(&self) -> bool {
+        matches!(self.stage, Stage::Battle)
+            && self.events.is_idle()
+            && self.state.phase == Side::Player
+            && self.state.outcome.is_none()
+            && matches!(self.panel, Panel::None)
+            && self.dialog.is_none()
+            && self.waiting.is_none()
+            && self.mode_menu.is_none()
+            && matches!(self.ui.mode, Mode::Browse)
+            && !self.touch_seen
+    }
+
     /// One frame of [`Screen::update`], before the danger tiles are brought up to date.
     fn update_frame(&mut self, ctx: &mut Ctx) -> Transition {
         self.poll_meta(ctx);
@@ -2156,6 +2286,16 @@ impl BattleScreen {
         } else {
             self.pointer_rest + dt
         };
+        // The frame's button tooltip: only while the buttons can be used.
+        let hovered = if self.frame_buttons_usable() {
+            ctx.input
+                .pointer()
+                .and_then(|p| self.frame.as_ref().and_then(|f| frame_button_at(f, p)))
+                .map(FrameButton::id)
+        } else {
+            None
+        };
+        self.hover.update(hovered, dt);
         let speed = self.speed(ctx);
         self.camera.update(dt);
         self.scene.enhanced = ctx.settings.battle_fx == crate::settings::BattleFx::Enhanced;
@@ -2268,7 +2408,8 @@ mod tests {
     }
 
     /// The map picture is baked into the renderer: a changed "그림" setting (D27) reloads it,
-    /// an unchanged one or a map without a picture keeps the renderer.
+    /// an unchanged one or a map without a picture keeps the renderer. The old renderer keeps
+    /// drawing the map until the new picture is ready, so no frame shows a bare floor.
     #[test]
     fn a_changed_art_setting_reloads_the_map_picture() {
         use crate::settings::ArtStyle;
@@ -2286,16 +2427,76 @@ mod tests {
         // No picture used yet: nothing to reload.
         s.follow_art_setting(ArtStyle::Remake);
         assert_eq!(s.meta.picture, None);
+        assert!(!s.remount_art);
         // Loaded with the original's art, the setting unchanged: kept.
         s.picture_art = Some(ArtStyle::Original);
         s.follow_art_setting(ArtStyle::Original);
         assert_eq!(s.meta.picture, None);
         assert_eq!(s.picture_art, Some(ArtStyle::Original));
-        // Changed: the picture is requested again and the renderer starts over.
+        // Changed: the picture is requested again, and the renderer is kept until it loads.
         s.follow_art_setting(ArtStyle::Remake);
         assert_eq!(s.meta.picture, picture);
         assert_eq!(s.picture_art, None);
-        assert!(!s.map.is_built());
+        assert!(s.remount_art);
+        let loading = |_: &str| AssetState::Loading;
+        assert!(!s.art_remount_ready(&loading));
+        // A map without a picture layer starts over at once.
+        s.meta.picture = None;
+        assert!(s.art_remount_ready(&loading));
+        // Ready or missing, it starts over.
+        s.meta.picture = Some("maps/hexz_00".to_string());
+        assert!(s.art_remount_ready(&|_: &str| AssetState::Ready));
+        assert!(s.art_remount_ready(&|_: &str| AssetState::Missing));
+    }
+
+    /// The phase ends by itself only after its delay, and only while the rule holds: a phase that
+    /// stops qualifying (a menu opened, a unit got an action back) restarts the delay instead of
+    /// ending the moment it qualifies again.
+    #[test]
+    fn the_auto_end_waits_out_its_delay() {
+        let mut idle = 0.0;
+        for _ in 0..3 {
+            assert!(!auto_end_step(&mut idle, 0.1, true), "ended early");
+        }
+        assert!((idle - 0.3).abs() < 1e-5, "{idle}");
+        // One more frame crosses the 0.4 s delay and restarts the timer.
+        assert!(auto_end_step(&mut idle, 0.1, true));
+        assert_eq!(idle, 0.0);
+        // Any frame the rule does not hold clears the time gathered so far.
+        assert!(!auto_end_step(&mut idle, 0.3, true));
+        assert!(!auto_end_step(&mut idle, 1.0, false));
+        assert_eq!(idle, 0.0);
+        assert!(!auto_end_step(&mut idle, 0.1, true), "the delay restarts");
+        // A frame longer than the delay (a stall, clamped by `MAX_FRAME_TIME`) still ends once.
+        assert!(auto_end_step(&mut idle, 10.0, true));
+        assert_eq!(idle, 0.0);
+    }
+
+    /// The rule of the auto end: the setting, the browse mode, the player's phase and no unit
+    /// left to command.
+    #[test]
+    fn the_auto_end_runs_only_for_a_finished_player_phase() {
+        let (_, mut state) = testutil::sishui();
+        state.phase = Side::Player;
+        for u in state.units.iter_mut().filter(|u| u.side == Side::Player) {
+            u.acted = true;
+        }
+        assert!(auto_end_armed(true, &Mode::Browse, &state));
+        // Off in the settings: the player asked to look around first.
+        assert!(!auto_end_armed(false, &Mode::Browse, &state));
+        // An enemy phase never ends by itself.
+        let mut enemy = state.clone();
+        enemy.phase = Side::Enemy;
+        assert!(!auto_end_armed(true, &Mode::Browse, &enemy));
+        // One unit still to act: nothing to end yet.
+        let mut waiting = state.clone();
+        let first = waiting
+            .units
+            .iter_mut()
+            .find(|u| u.side == Side::Player)
+            .expect("a player unit");
+        first.acted = false;
+        assert!(!auto_end_armed(true, &Mode::Browse, &waiting));
     }
 
     fn scene_record() -> SceneResume {
@@ -2534,6 +2735,82 @@ mod tests {
             .contains_key(&name(officers[1])));
     }
 
+    /// A quick save with the animation to replay is about twice a plain mid-battle save (the
+    /// replay holds the battle state from before the action as well). The web build keeps its
+    /// saves in `localStorage`, so this checks that the copy stays within it: 12 slots at this
+    /// size are well under the 5 MiB a browser allows.
+    #[test]
+    fn a_quick_save_with_a_replay_stays_within_a_browsers_storage() {
+        let (pack, state) = testutil::sishui();
+        let session =
+            crate::flow::Session::new(hero_core::campaign::CampaignState::new_game(&pack));
+        let save = |replay: Option<BattleReplay>| {
+            let s = crate::quicksave::snapshot(
+                &pack,
+                &session,
+                vec![crate::quicksave::ResumePoint::Battle {
+                    state: Box::new(state.clone()),
+                    pending_scenes: vec!["p1_after".into()],
+                    scene: None,
+                    replay: replay.map(Box::new),
+                }],
+            )
+            .unwrap();
+            s.to_json().len()
+        };
+        let plain = save(None);
+        let replay = BattleReplay {
+            before: state.clone(),
+            events: vec![BattleEvent::PhaseStart {
+                side: Side::Enemy,
+                turn: 1,
+            }],
+        };
+        let replayed = save(Some(replay));
+        // Twice the state plus the events, and no more.
+        assert!(
+            replayed <= 2 * plain + 1024,
+            "{plain} bytes without a replay, {replayed} with"
+        );
+        // The prologue battle has ten units; a full one has some forty, so four times this.
+        const SLOTS: usize =
+            crate::saves::MANUAL_SLOTS as usize + crate::saves::QUICK_SLOTS as usize + 1;
+        assert!(
+            4 * SLOTS * replayed < 4 * 1024 * 1024,
+            "{replayed} bytes a save: {SLOTS} slots of a full battle would not fit"
+        );
+    }
+
+    /// A scene shown over the battle sets campaign flags; the battle takes them in when the
+    /// scene closes, so the events that run next see them, and the caller is told the battle
+    /// changed only then (a quick save before the next action writes it).
+    #[test]
+    fn a_scene_over_the_battle_hands_its_flags_to_the_battle() {
+        let (pack, state) = testutil::sishui();
+        let mut state = state;
+        let _ = &pack;
+        let mut campaign = BTreeMap::new();
+        // The scene's `@set` wrote the campaign's flags; nothing changed in the battle yet.
+        campaign.insert("captives".to_string(), 2);
+        assert_eq!(state.flag("captives"), 0);
+        assert!(return_from_drama(&mut state, &campaign));
+        assert_eq!(state.flag("captives"), 2);
+        // Nothing more to take in: the caller does not write the session again.
+        assert!(!return_from_drama(&mut state, &campaign));
+        // A flag the scene did not touch stays as the battle had it.
+        campaign.remove("captives");
+        campaign.insert("pursue".to_string(), 1);
+        assert!(return_from_drama(&mut state, &campaign));
+        assert_eq!(state.flag("captives"), 2);
+        assert_eq!(state.flag("pursue"), 1);
+        // An event gated on the scene's flag fires from then on.
+        assert!(state.conditions_hold(&[hero_core::battledef::FlagCond {
+            flag: "captives".into(),
+            cmp: hero_core::script::Compare::Ge,
+            value: 2,
+        }]));
+    }
+
     /// The default (and smallest allowed), VGA and the largest allowed canvas.
     const CANVASES: [Vec2; 3] = [
         crate::gfx::DEFAULT_CANVAS,
@@ -2586,6 +2863,22 @@ mod tests {
             assert!(last.right() < (canvas.x + UNIT_LIST_W) / 2.0);
             assert_eq!(unit_tab_at(vp, last.center()), Some(2));
         }
+    }
+
+    #[test]
+    fn frame_buttons_carry_their_own_ids_and_tooltips() {
+        // The hover timer tracks a button by its `u64` id, and the tooltip lookup has to find the
+        // same button back.
+        for button in FrameButton::ALL {
+            assert_eq!(FrameButton::from_id(button.id()), Some(button));
+            assert!(!button.tooltip().is_empty());
+        }
+        let ids: Vec<u64> = FrameButton::ALL.iter().map(|b| b.id()).collect();
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len(), "every button has its own id");
+        assert_eq!(FrameButton::from_id(99), None);
     }
 
     #[test]

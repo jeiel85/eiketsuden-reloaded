@@ -20,6 +20,8 @@
 
 use super::error::ErrorScreen;
 use super::gallery::GalleryScreen;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::app::RemakeMaps;
 use crate::app::{Ctx, Screen, Transition};
 use crate::assets::{FileBatch, FileRequest, FirstOf, Media};
 use crate::audio::{bgm, sfx};
@@ -662,10 +664,11 @@ impl LoadingScreen {
             root.top_dir()
         );
         let remake_prefix = format!("gfx/{}/maps/", hero_import::remake::REMAKE_DIR);
-        ctx.remake_maps_missing = !converted
-            .files
-            .keys()
-            .any(|k| k.starts_with(&remake_prefix));
+        ctx.remake_maps = remake_maps_of(
+            &converted.files,
+            converted.index.assets["maps"].status,
+            &remake_prefix,
+        );
         memfs::mount(root.top_dir(), converted.files);
         ctx.media = Media::for_settings(root.clone(), &ctx.settings);
         ctx.data_root = root;
@@ -676,6 +679,39 @@ impl LoadingScreen {
         self.stage = Stage::Start;
         Transition::None
     }
+}
+
+/// Whether this launch's converted original-mode pack has the new art's map pictures (D27).
+///
+/// * Input: the files the converted pack holds, whether its `maps` report failed or was only
+///   partly converted, and the path prefix the pictures are under.
+/// * Output: [`RemakeMaps::Ready`] with every picture, [`RemakeMaps::Failed`] when the conversion
+///   could not draw them all, and [`RemakeMaps::NotDrawn`] when it simply left them out for the
+///   original art.
+/// * Why: the setting's row said "맵은 재시작 후" even when no restart could help, which sent the
+///   player looking for a change a restart would not make.
+///
+/// Native only, like the conversion it reads: the browser build has no original layer, so its
+/// art row is always disabled and the answer is never asked for.
+#[cfg(not(target_arch = "wasm32"))]
+fn remake_maps_of(
+    files: &BTreeMap<String, Vec<u8>>,
+    maps: hero_import::extract::Status,
+    prefix: &str,
+) -> RemakeMaps {
+    use hero_import::extract::Status;
+    let pictures = files.keys().filter(|k| k.starts_with(prefix)).count();
+    if pictures > 0 && matches!(maps, Status::Extracted) {
+        return RemakeMaps::Ready;
+    }
+    // Nothing readable to draw from, or some drawings failed: a restart draws the same.
+    if matches!(
+        maps,
+        Status::Failed | Status::MissingSource | Status::Partial
+    ) {
+        return RemakeMaps::Failed;
+    }
+    RemakeMaps::NotDrawn
 }
 
 /// Whether this launch should play the original mode (native, not with an explicit `--data`).
@@ -829,6 +865,50 @@ version = \"1\"
             .with_original_layer(Some(0));
         let root = chain_root(&stale, &chain(&[("base", None)]));
         assert!(!root.has_original_layer());
+    }
+
+    /// The art setting's "맵" note: pictures there is nothing to say; left out only says a
+    /// restart will draw them; a drawing that failed or had nothing to draw from says so, so a
+    /// restart is not promised.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_map_pictures_say_whether_a_restart_would_draw_them() {
+        use hero_import::extract::Status;
+        let prefix = "gfx/remake/maps/";
+        let files = |keys: &[&str]| {
+            keys.iter()
+                .map(|k| ((*k).to_string(), Vec::new()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let both = files(&["gfx/remake/maps/hexz_00.png", "gfx/remake/maps/hexz_01.png"]);
+        assert_eq!(
+            remake_maps_of(&both, Status::Extracted, prefix),
+            RemakeMaps::Ready
+        );
+        // The conversion ran for the original art: nothing drawn, and a restart with 새 그림
+        // draws them.
+        assert_eq!(
+            remake_maps_of(&files(&["gfx/maps/hexz_00.png"]), Status::Extracted, prefix),
+            RemakeMaps::NotDrawn
+        );
+        // Nothing readable to draw from, one drawing failed, or only some maps drawn: a restart
+        // fails the same way.
+        for status in [Status::Failed, Status::MissingSource, Status::Partial] {
+            assert_eq!(
+                remake_maps_of(&files(&["gfx/maps/hexz_00.png"]), status, prefix),
+                RemakeMaps::Failed,
+                "{status:?}"
+            );
+        }
+        assert_eq!(
+            remake_maps_of(
+                &files(&["gfx/remake/maps/hexz_00.png"]),
+                Status::Partial,
+                prefix
+            ),
+            RemakeMaps::Failed,
+            "one picture of two, the other failed"
+        );
     }
 
     #[test]

@@ -2723,6 +2723,9 @@ fn convert_battles(
         ));
     }
     report.notes.extend(chapter.keep_reached());
+    // A block that starts a battle but converts to no battle plays as a told scene: the pack is
+    // written, but the conversion says so instead of dropping the battle quietly.
+    report.errors.extend(chapter.lost_battles.iter().cloned());
     let starting: BTreeSet<String> = options
         .campaign
         .iter()
@@ -7038,6 +7041,44 @@ mod tests {
         assert!(index.maps.is_empty());
         let manifest = std::fs::read_to_string(out.path().join("pack.toml")).unwrap();
         assert!(!manifest.contains("maps"), "{manifest}");
+    }
+
+    #[test]
+    fn the_new_art_maps_are_drawn_only_when_asked_for() {
+        let src = TempDir::new("pack-src-remake");
+        write_pack_install(src.path());
+        let out = TempDir::new("pack-out-remake");
+        // Left out by default: the game's conversion at every start draws them only for a player
+        // whose setting asks for the new art.
+        let index = write_pack(src.path(), &out.path().join("a"), &options()).unwrap();
+        assert!(index.success(), "{:#?}", index.assets);
+        let a = out.path().join("a");
+        for number in [0, 1] {
+            let path = remake_path(&format!("maps/{}", map_id(number)));
+            assert!(!a.join(&path).exists(), "{path}");
+        }
+        assert!(!index.files.iter().any(|f| f.contains("remake/maps")));
+
+        // Asked for: a picture each, 32 px per cell like the rest of the new art.
+        let opts = PackOptions {
+            remake_maps: true,
+            ..options()
+        };
+        let b = out.path().join("b");
+        let index = write_pack(src.path(), &b, &opts).unwrap();
+        assert!(index.success(), "{:#?}", index.assets);
+        for (number, w, h) in [(0, 3usize, 2usize), (1, 2, 2)] {
+            let path = remake_path(&format!("maps/{}", map_id(number)));
+            let png = std::fs::read(b.join(&path)).unwrap_or_else(|e| panic!("{path}: {e}"));
+            // IHDR: width then height, big-endian u32 each.
+            let size = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
+            assert_eq!(
+                (size(16) as usize, size(20) as usize),
+                (w * remake::CELL, h * remake::CELL),
+                "{path}"
+            );
+            assert!(index.files.contains(&path), "{path} not in the index");
+        }
     }
 
     #[test]

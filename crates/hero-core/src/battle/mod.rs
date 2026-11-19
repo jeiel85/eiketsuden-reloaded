@@ -9,7 +9,7 @@
 //! sections: `setup` (battle construction), `stats` (§2), `path` (§3), `combat` (§4, §7, §11),
 //! `strategy` (§5, §10), `flow` (§1, §6, §8, §9) and `ai` (§12).
 
-use crate::battledef::{AiMode, BattleDef, Side};
+use crate::battledef::{AiMode, BattleDef, HalveStat, Side};
 use crate::campaign::CampaignState;
 use crate::data::{Equipment, Id, StatusKind, TerrainDef};
 use crate::geom::{Dir, Pos};
@@ -412,6 +412,15 @@ pub enum BattleEvent {
     /// An event changed the objective text to `text` ([`BattleState::objective_text`]).
     ObjectiveChanged {
         text: String,
+    },
+    /// An event halved a side's morale or troops (`halve`): unit `unit`'s `stat` went from `from`
+    /// to `to`. Without it the bar fell with nothing on screen to explain the fall (the
+    /// original only shows the scene's lines before it).
+    Halved {
+        unit: UnitId,
+        stat: HalveStat,
+        from: i32,
+        to: i32,
     },
     Victory,
     Defeat(DefeatReason),

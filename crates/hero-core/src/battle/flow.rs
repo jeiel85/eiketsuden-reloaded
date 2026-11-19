@@ -454,6 +454,15 @@ impl BattleState {
                         HalveStat::Morale => {
                             let before = self.units[id].morale;
                             self.units[id].morale = before / 2;
+                            let to = self.units[id].morale;
+                            if to != before {
+                                ev.push(BattleEvent::Halved {
+                                    unit: id,
+                                    stat: *stat,
+                                    from: before,
+                                    to,
+                                });
+                            }
                             let set = self.morale_set(pack, id, before);
                             ev.extend(Self::morale_set_event(id, set));
                             // A confused unit left without morale retreats, as after a blow.
@@ -463,7 +472,17 @@ impl BattleState {
                         // standing; the engine has no unit at 0 HP that has not retreated.)
                         HalveStat::Hp => {
                             let u = &mut self.units[id];
-                            u.hp = (u.hp / 2).max(1);
+                            let before = u.hp;
+                            u.hp = (before / 2).max(1);
+                            let to = u.hp;
+                            if to != before {
+                                ev.push(BattleEvent::Halved {
+                                    unit: id,
+                                    stat: *stat,
+                                    from: before,
+                                    to,
+                                });
+                            }
                         }
                     }
                 }

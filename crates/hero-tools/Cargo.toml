@@ -15,3 +15,7 @@ path = "src/main.rs"
 hero-core = { path = "../hero-core" }
 hero-import = { path = "../hero-import" }
 serde_json.workspace = true
+
+[dev-dependencies]
+# The tests write battle and scene definitions as the pack files do.
+toml.workspace = true

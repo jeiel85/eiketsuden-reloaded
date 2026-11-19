@@ -321,7 +321,11 @@ impl DuelView {
     /// takes their name with them.
     fn draw_names(&self, ctx: &Ctx, stage: Rect) {
         let gfx = &ctx.gfx;
-        let small = TextStyle::small(theme::TEXT).shadow(theme::TEXT_SHADOW);
+        let size = name_size(stage);
+        let text_style = TextStyle::small(theme::TEXT)
+            .shadow(theme::TEXT_SHADOW)
+            .size(size);
+        let pad = NAME_PAD * f32::from(size);
         for (i, r) in name_rects(stage).into_iter().enumerate() {
             let f = &self.fighters[i];
             if f.gone {
@@ -329,9 +333,11 @@ impl DuelView {
             }
             draw_window_ex(r, WindowStyle::Panel, 0.85);
             // A pack may name an officer longer than the window: a cut name still identifies the
-            // fighter better than one spilling over the stage.
-            let name = gfx.elide(fighter_name(ctx, f), FontId::Small, 1, r.w - 2.0 * NAME_PAD);
-            gfx.text_aligned(&name, r.x, r.y + 2.0, r.w, Align::Center, small);
+            // fighter better than one spilling over the stage. The cut goes in the middle, so two
+            // long names that differ only at their ends stay apart.
+            let name = gfx.elide_middle(fighter_name(ctx, f), FontId::Small, size, r.w - 2.0 * pad);
+            let y = r.y + ((r.h - gfx.line_height(FontId::Small, size)) / 2.0).round();
+            gfx.text_aligned(&name, r.x, y, r.w, Align::Center, text_style);
         }
     }
 }
@@ -351,25 +357,43 @@ fn off_stage(x: i32) -> bool {
     x + 4 <= 0 || x - 2 >= STAGE_CELLS
 }
 
-/// Height of the name windows over the stage.
-const NAME_H: f32 = 14.0;
-/// Gap between a name window and the stage's edge.
+/// Gap between a name window and the stage's edge, in stage pixels.
 const NAME_MARGIN: f32 = 4.0;
-/// Narrowest a name window gets, so a one-character name still reads as a window.
+/// Narrowest a name window gets at size 1, so a one-character name still reads as a window.
 const NAME_MIN_W: f32 = 24.0;
-/// Room left inside a name window on each side of the text.
+/// Room left inside a name window on each side of the text, at size 1.
 const NAME_PAD: f32 = 3.0;
+
+/// How much bigger than 1:1 the stage is drawn: 1 up to 1.5, else the whole number that fits.
+///
+/// The name windows and their text follow it, so they grow with the riders: drawn at 1:1 while
+/// the stage is at 2× they would look like a footnote on a poster.
+fn name_size(stage: Rect) -> u8 {
+    let fit = stage.w / STAGE_W;
+    // The text only comes in whole-number sizes; a fractional one would blur.
+    if fit >= 1.5 {
+        fit.round().max(2.0) as u8
+    } else {
+        1
+    }
+}
 
 /// The name windows of the two fighters on `stage`: the left one along the left edge and the
 /// right one along the right edge, both at the top (the sky band the riders do not reach).
+///
+/// The height comes from the small font's line box at [`name_size`], not from a fixed constant, so
+/// a larger stage (or a pack font with a taller line box) gets taller windows instead of names
+/// spilling over their edges.
 fn name_rects(stage: Rect) -> [Rect; 2] {
-    let y = stage.y + NAME_MARGIN;
-    // A quarter of the stage each: enough for a three-character name at 1:1, and they never meet
-    // on the narrowest stage.
-    let w = (stage.w / 4.0).max(NAME_MIN_W).round();
+    let size = f32::from(name_size(stage));
+    let h = (FontId::Small.line_height() * size + 2.0 * size).round();
+    let y = stage.y + NAME_MARGIN * size;
+    // A quarter of the stage each: enough for a three-character name, and they never meet on the
+    // narrowest stage.
+    let w = (stage.w / 4.0).max(NAME_MIN_W * size).round();
     [
-        Rect::new(stage.x + NAME_MARGIN, y, w, NAME_H),
-        Rect::new(stage.right() - NAME_MARGIN - w, y, w, NAME_H),
+        Rect::new(stage.x + NAME_MARGIN * size, y, w, h),
+        Rect::new(stage.right() - NAME_MARGIN * size - w, y, w, h),
     ]
 }
 
@@ -443,6 +467,7 @@ mod tests {
             Rect::new(0.0, 0.0, 208.0, 400.0),
         ] {
             let stage = stage_rect(area);
+            let line = crate::gfx::FontId::Small.line_height();
             let [left, right] = name_rects(stage);
             for r in [left, right] {
                 assert!(
@@ -450,12 +475,42 @@ mod tests {
                     "{r:?} {stage:?}"
                 );
                 assert!(r.y >= stage.y && r.bottom() <= stage.bottom(), "{r:?}");
+                // The text's line box fits inside the window with its padding.
+                assert!(r.h >= line, "{r:?}");
                 // Above the riders: they start at ROW cells from the top.
-                assert!(r.bottom() <= stage.y + ROW * CELL * (stage.w / STAGE_W));
+                assert!(
+                    r.bottom() <= stage.y + ROW * CELL * (stage.w / STAGE_W),
+                    "{r:?}"
+                );
             }
             assert!(left.right() < right.x, "{left:?} {right:?}");
             assert_eq!(left.y, right.y);
         }
+    }
+
+    #[test]
+    fn the_name_windows_grow_with_the_stage() {
+        // 1:1 keeps the text at size 1 and the window at the small font's line box plus air.
+        let small = stage_rect(Rect::new(16.0, 32.0, 416.0, 352.0));
+        assert_eq!(name_size(small), 1);
+        let line = crate::gfx::FontId::Small.line_height();
+        assert_eq!(name_rects(small)[0].h, line + 2.0);
+        // Twice as large a stage draws the names at twice the size, inside taller windows.
+        let big = stage_rect(Rect::new(0.0, 0.0, 1280.0, 600.0));
+        assert_eq!(big.w, 2.0 * STAGE_W);
+        assert_eq!(name_size(big), 2);
+        let [left, right] = name_rects(big);
+        // The line box of the small font at size 2 plus a pixel of air above and below.
+        let line = crate::gfx::FontId::Small.line_height() * 2.0;
+        assert!(left.h >= line, "{left:?}");
+        assert!(left.h <= line + 4.0, "{left:?}");
+        // The windows still sit over the sky band, above the riders' heads.
+        assert!(left.bottom() <= big.y + ROW * CELL * 2.0, "{left:?}");
+        assert!(left.right() < right.x, "{left:?} {right:?}");
+        // A stage just under twice the size keeps the sharp 1:1 text.
+        let odd = stage_rect(Rect::new(0.0, 0.0, 700.0, 400.0));
+        assert_eq!(odd.w, STAGE_W);
+        assert_eq!(name_size(odd), 1);
     }
 
     #[test]
