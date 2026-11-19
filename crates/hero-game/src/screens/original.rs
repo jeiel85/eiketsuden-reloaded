@@ -182,27 +182,13 @@ const READS_IN_BACKGROUND: bool = true;
 #[cfg(not(target_os = "linux"))]
 const READS_IN_BACKGROUND: bool = false;
 
-/// The first line of the clipboard, `None` when it holds no text. On Linux it runs on a worker
-/// thread with its own X11 connection, which gives up on a clipboard owner that does not answer
-/// (arboard waits 4 s for each of the six text formats it asks for, so up to about 24 s; Esc
-/// cancels meanwhile, and a timeout reads as an empty clipboard). miniquad's read waits for it
-/// forever on the main thread (docs/DECISIONS.md D14).
-#[cfg(target_os = "linux")]
+/// The first line of the clipboard, `None` when it holds no text.
+///
+/// [`crate::platform::clipboard::read_blocking`] takes the Linux read off this thread (the X11
+/// clipboard answers as slowly as its owner does) and miniquad's read stays on it
+/// (docs/DECISIONS.md D14); [`OriginalScreen::paste`] decides which thread that is.
 fn read_clipboard() -> Result<Option<String>, String> {
-    let mut clipboard =
-        arboard::Clipboard::new().map_err(|e| format!("클립보드를 열지 못했습니다: {e}"))?;
-    match clipboard.get_text() {
-        Ok(text) => Ok(first_line(&text)),
-        Err(arboard::Error::ContentNotAvailable) => Ok(None),
-        Err(e) => Err(format!("클립보드를 읽지 못했습니다: {e}")),
-    }
-}
-
-/// The first line of the clipboard, `None` when it holds no text (the platform's clipboard
-/// answers at once here).
-#[cfg(not(target_os = "linux"))]
-fn read_clipboard() -> Result<Option<String>, String> {
-    Ok(macroquad::miniquad::window::clipboard_get().and_then(|s| first_line(&s)))
+    crate::platform::clipboard::read_blocking().map(|text| text.and_then(|t| first_line(&t)))
 }
 
 /// Forget the characters typed before (macroquad keeps them until they are read).

@@ -1,17 +1,27 @@
 //! Save / load slot screen, reusable from the title screen (load) and the camp (save).
 //!
 //! * [`SaveLoadScreen::load`] lists every slot; choosing a filled slot offers
-//!   불러오기 / 삭제, and loading continues the game ([`Flow::Continue`]).
+//!   불러오기 / 내보내기 / 삭제, and loading continues the game ([`Flow::Continue`]).
 //! * [`SaveLoadScreen::save`] writes the given [`SaveGame`] into a manual slot (the autosave slot
 //!   is read-only here), asking before overwriting, then returns to the previous screen.
 //!
 //! Deleting always asks for confirmation. The Delete key deletes the selected slot directly
 //! (with confirmation). The screen pops itself on cancel.
+//!
+//! Two tools carry records between devices and tidy old ones, on the `T` key (the footer says so):
+//! a slot's record goes to the clipboard as the JSON text it is stored as, and a record pasted
+//! from the clipboard comes into the first free manual slot. "모두 지우기" clears every record of
+//! the pack, the automatic and quick ones included (`saves::clear`); until this, the only way to
+//! delete anything was this screen's Delete, slot by slot.
+//!
+//! The clipboard answers later (a browser asks the player, X11 waits for the owner), so the
+//! screen starts the work and keeps drawing: [`crate::platform::clipboard`].
 
 use crate::app::{Ctx, Enter, Screen, Transition};
 use crate::audio::sfx;
 use crate::flow::Flow;
 use crate::gfx::{fill_rect, Align, TextStyle};
+use crate::platform::clipboard::{Clipboard, Event as ClipboardEvent};
 use crate::platform::unix_now;
 use crate::quicksave;
 use crate::saves::{self, SlotInfo, SlotStatus};
@@ -23,6 +33,9 @@ use crate::ui::window::{draw_title_bar, draw_window_ex, WindowStyle};
 use hero_core::save::SaveGame;
 use macroquad::prelude::*;
 
+/// Key that opens the record tools (import / clear every record).
+const TOOLS_KEY: KeyCode = KeyCode::T;
+
 enum Mode {
     Load,
     Save(Box<SaveGame>),
@@ -32,6 +45,8 @@ enum Mode {
 enum SlotAction {
     Load,
     Save,
+    /// Put the slot's record on the clipboard ([`saves::export_text`]).
+    Export,
     Delete,
     Cancel,
 }
@@ -41,10 +56,40 @@ impl SlotAction {
         match self {
             SlotAction::Load => "불러오기",
             SlotAction::Save => "여기에 기록",
+            SlotAction::Export => "클립보드로 내보내기",
             SlotAction::Delete => "삭제",
             SlotAction::Cancel => "취소",
         }
     }
+}
+
+/// What the tools box (and its confirmations) can do beyond one slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolAction {
+    /// Read a record from the clipboard and put it in a manual slot.
+    Import,
+    /// Remove every record of the pack.
+    ClearAll,
+    Cancel,
+}
+
+impl ToolAction {
+    fn label(self) -> &'static str {
+        match self {
+            ToolAction::Import => "클립보드에서 가져오기",
+            ToolAction::ClearAll => "기록 모두 지우기",
+            ToolAction::Cancel => "취소",
+        }
+    }
+}
+
+/// A clipboard operation the screen started, waiting for its answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pending {
+    /// The record of this slot is being copied.
+    Export(saves::SaveSlot),
+    /// A record is being read for [`ToolAction::Import`].
+    Import,
 }
 
 enum Popup {
@@ -54,9 +99,24 @@ enum Popup {
         actions: Vec<SlotAction>,
         choice: ChoiceBox,
     },
+    Tools {
+        actions: Vec<ToolAction>,
+        choice: ChoiceBox,
+    },
     Confirm {
         slot: usize,
         action: SlotAction,
+        dialog: ConfirmDialog,
+    },
+    /// A pasted record, about to replace the record in `slot` (the confirmation).
+    Import {
+        slot: usize,
+        imported: Box<saves::Imported>,
+        dialog: ConfirmDialog,
+    },
+    /// "Remove every record?" and how many there are.
+    ClearAll {
+        count: usize,
         dialog: ConfirmDialog,
     },
 }
@@ -75,6 +135,10 @@ pub struct SaveLoadScreen {
     menu: Menu,
     popup: Popup,
     now: u64,
+    clipboard: Clipboard,
+    pending: Option<Pending>,
+    /// When the pending clipboard request started ([`get_time`]), for the timeout.
+    pending_since: f64,
 }
 
 impl SaveLoadScreen {
@@ -97,6 +161,9 @@ impl SaveLoadScreen {
             menu: Menu::new(Vec::new()),
             popup: Popup::None,
             now: 0,
+            clipboard: Clipboard::new(),
+            pending: None,
+            pending_since: 0.0,
         }
     }
 
@@ -156,6 +223,9 @@ impl SaveLoadScreen {
             _ => {}
         }
         if info.status != SlotStatus::Empty {
+            // Even a record this game cannot open can be carried to another device (or a
+            // newer version of this one): it travels as the text it was stored as.
+            actions.push(SlotAction::Export);
             actions.push(SlotAction::Delete);
         }
         actions.push(SlotAction::Cancel);
@@ -221,6 +291,21 @@ impl SaveLoadScreen {
                     }
                 }
             }
+            SlotAction::Export => {
+                match saves::export_text(ctx.storage.as_ref(), slot, &self.pack_id) {
+                    Ok(text) => match self.clipboard.copy(&text) {
+                        Ok(()) => self.expect(Pending::Export(slot)),
+                        Err(why) => {
+                            ctx.sfx(sfx::ERROR);
+                            ctx.toast(format!("내보내지 못했습니다: {why}"));
+                        }
+                    },
+                    Err(e) => {
+                        ctx.sfx(sfx::ERROR);
+                        ctx.toast(format!("내보내지 못했습니다: {e}"));
+                    }
+                }
+            }
             SlotAction::Delete => match saves::delete(ctx.storage.as_mut(), slot, &self.pack_id) {
                 Ok(()) => ctx.toast(format!("{}을(를) 삭제했습니다.", slot.name())),
                 Err(e) => {
@@ -232,6 +317,153 @@ impl SaveLoadScreen {
         }
         self.refresh(ctx);
         Transition::None
+    }
+
+    /// The tools box (`T`): import a record, clear every record.
+    fn open_tools(&mut self, ctx: &mut Ctx) {
+        let mut actions = vec![ToolAction::Import];
+        if saves::record_count(ctx.storage.as_ref(), &self.pack_id) > 0 {
+            actions.push(ToolAction::ClearAll);
+        }
+        actions.push(ToolAction::Cancel);
+        let labels: Vec<&str> = actions.iter().map(|a| a.label()).collect();
+        let cancel = actions.len() - 1;
+        let choice = ChoiceBox::new(&ctx.gfx, Some("기록 도구"), &labels, Some(cancel));
+        self.popup = Popup::Tools { actions, choice };
+    }
+
+    /// Start reading a record from the clipboard ([`ToolAction::Import`]); the answer arrives
+    /// from [`SaveLoadScreen::poll_clipboard`].
+    fn start_import(&mut self, ctx: &mut Ctx) {
+        match self.clipboard.paste() {
+            Ok(()) => self.expect(Pending::Import),
+            Err(why) => {
+                ctx.sfx(sfx::ERROR);
+                ctx.toast(why);
+            }
+        }
+    }
+
+    /// Remember what the running clipboard request is for and when it started, so a browser
+    /// that never answers (an unfocused tab can leave the promise pending) is given up on
+    /// instead of leaving the screen waiting forever.
+    fn expect(&mut self, pending: Pending) {
+        self.pending = Some(pending);
+        self.pending_since = get_time();
+    }
+
+    /// How long a clipboard request may stay unanswered, in seconds: a browser permission
+    /// prompt left open, or a tab that lost focus mid-request, can leave the promise pending
+    /// forever. The screen gives up and says so; a late answer is ignored (the page numbers its
+    /// requests, so an old one cannot be taken for a new one).
+    const CLIPBOARD_TIMEOUT: f64 = 60.0;
+
+    /// The clipboard answer the screen was waiting for. No-op while none is pending.
+    fn poll_clipboard(&mut self, ctx: &mut Ctx) {
+        if let Some(event) = self.clipboard.poll() {
+            self.pending = None;
+            self.take_event(ctx, event);
+            return;
+        }
+        if self.pending.is_some() && get_time() - self.pending_since > Self::CLIPBOARD_TIMEOUT {
+            self.clipboard.abandon();
+            self.pending = None;
+            ctx.sfx(sfx::ERROR);
+            ctx.toast("클립보드가 응답하지 않습니다. 다시 시도해 주세요.");
+        }
+    }
+
+    /// Carry out what a settled clipboard operation reported.
+    fn take_event(&mut self, ctx: &mut Ctx, event: ClipboardEvent) {
+        match event {
+            ClipboardEvent::Copied(Ok(())) => {
+                ctx.sfx(sfx::CONFIRM);
+                ctx.toast("클립보드로 내보냈습니다.");
+            }
+            ClipboardEvent::Copied(Err(why)) => {
+                ctx.sfx(sfx::ERROR);
+                ctx.toast(format!("내보내지 못했습니다: {why}"));
+            }
+            ClipboardEvent::Pasted(Ok(None)) => {
+                ctx.sfx(sfx::ERROR);
+                ctx.toast("클립보드에 기록이 없습니다.");
+            }
+            ClipboardEvent::Pasted(Err(why)) => {
+                ctx.sfx(sfx::ERROR);
+                ctx.toast(format!("가져오지 못했습니다: {why}"));
+            }
+            ClipboardEvent::Pasted(Ok(Some(text))) => self.take_import(ctx, &text),
+        }
+    }
+
+    /// Put the pasted record `text` into a manual slot: straight into the first empty one, or
+    /// after a confirmation when every manual slot holds something.
+    fn take_import(&mut self, ctx: &mut Ctx, text: &str) {
+        let imported = match saves::import_text(text, &self.pack_id, &self.slots) {
+            Ok(imported) => imported,
+            Err(why) => {
+                ctx.sfx(sfx::ERROR);
+                ctx.toast(why.to_string());
+                return;
+            }
+        };
+        let Some(index) = self.slots.iter().position(|i| i.slot == imported.slot) else {
+            ctx.sfx(sfx::ERROR);
+            ctx.toast("가져온 기록을 넣을 칸이 없습니다.");
+            return;
+        };
+        if self.slots[index].status == SlotStatus::Empty {
+            self.write_import(ctx, index, &imported);
+            return;
+        }
+        let name = imported.slot.name();
+        let dialog = ConfirmDialog::new(
+            &ctx.gfx,
+            &format!("모든 기록 칸이 차 있습니다. {name}에 덮어쓸까요?"),
+        )
+        .default_no();
+        self.popup = Popup::Import {
+            slot: index,
+            imported: Box::new(imported),
+            dialog,
+        };
+    }
+
+    /// Write a pasted record into slot `index` and report it.
+    fn write_import(&mut self, ctx: &mut Ctx, index: usize, imported: &saves::Imported) {
+        let slot = self.slots[index].slot;
+        match saves::write(ctx.storage.as_mut(), slot, &imported.save) {
+            Ok(()) => {
+                ctx.sfx(sfx::CONFIRM);
+                ctx.toast(format!(
+                    "{}에 기록을 가져왔습니다: {}",
+                    slot.name(),
+                    imported.save.label
+                ));
+                self.refresh(ctx);
+            }
+            Err(e) => {
+                ctx.sfx(sfx::ERROR);
+                ctx.toast(format!("가져오지 못했습니다: {e}"));
+            }
+        }
+    }
+
+    /// Remove every record of the pack, after asking.
+    fn clear_all(&mut self, ctx: &mut Ctx) {
+        match saves::clear(ctx.storage.as_mut(), &self.pack_id) {
+            Ok(0) => ctx.toast("지울 기록이 없습니다."),
+            Ok(n) => {
+                ctx.sfx(sfx::CONFIRM);
+                ctx.toast(format!("기록 {n}개를 지웠습니다."));
+                self.refresh(ctx);
+            }
+            Err(e) => {
+                ctx.sfx(sfx::ERROR);
+                ctx.toast(format!("지우지 못했습니다: {e}"));
+                self.refresh(ctx);
+            }
+        }
     }
 
     fn update_popup(&mut self, ctx: &mut Ctx) -> Option<Transition> {
@@ -280,6 +512,61 @@ impl SaveLoadScreen {
                 }
                 Some(Transition::None)
             }
+            Popup::Tools {
+                actions,
+                mut choice,
+            } => {
+                match choice.update(ctx) {
+                    ChoiceEvent::Chosen(i) => match actions[i] {
+                        ToolAction::Import => self.start_import(ctx),
+                        ToolAction::ClearAll => {
+                            let count = saves::record_count(ctx.storage.as_ref(), &self.pack_id);
+                            let dialog = ConfirmDialog::new(
+                                &ctx.gfx,
+                                &format!(
+                                    "이 팩의 기록 {count}개를 모두 지울까요? \
+                                     자동 기록과 순간 저장도 함께 지워집니다."
+                                ),
+                            )
+                            .default_no()
+                            .labels("모두 지우기", "취소");
+                            self.popup = Popup::ClearAll { count, dialog };
+                        }
+                        ToolAction::Cancel => {}
+                    },
+                    ChoiceEvent::Cancelled => {}
+                    ChoiceEvent::None => {
+                        self.popup = Popup::Tools { actions, choice };
+                    }
+                }
+                Some(Transition::None)
+            }
+            Popup::Import {
+                slot,
+                imported,
+                mut dialog,
+            } => {
+                match dialog.update(ctx) {
+                    ConfirmEvent::Yes => self.write_import(ctx, slot, &imported),
+                    ConfirmEvent::No => {}
+                    ConfirmEvent::None => {
+                        self.popup = Popup::Import {
+                            slot,
+                            imported,
+                            dialog,
+                        }
+                    }
+                }
+                Some(Transition::None)
+            }
+            Popup::ClearAll { count, mut dialog } => {
+                match dialog.update(ctx) {
+                    ConfirmEvent::Yes => self.clear_all(ctx),
+                    ConfirmEvent::No => {}
+                    ConfirmEvent::None => self.popup = Popup::ClearAll { count, dialog },
+                }
+                Some(Transition::None)
+            }
         }
     }
 }
@@ -294,8 +581,14 @@ impl Screen for SaveLoadScreen {
     }
 
     fn update(&mut self, ctx: &mut Ctx) -> Transition {
+        // A clipboard answer is not a key press: it can arrive while a popup is open.
+        self.poll_clipboard(ctx);
         if let Some(t) = self.update_popup(ctx) {
             return t;
+        }
+        if ctx.input.key_pressed(TOOLS_KEY) {
+            self.open_tools(ctx);
+            return Transition::None;
         }
         if ctx.input.key_pressed(KeyCode::Delete) {
             let i = self.menu.cursor();
@@ -396,14 +689,20 @@ impl Screen for SaveLoadScreen {
                 }
             }
         }
-        gfx.text_aligned(
-            "Z/Enter 선택 · X/Esc 돌아가기 · Delete 삭제",
-            0.0,
-            h - 15.0,
-            w - 8.0,
-            Align::Right,
-            TextStyle::small(theme::TEXT_DISABLED),
-        );
+        // The clipboard answers later; until then the footer says what is being waited for
+        // instead of the key help, so a browser permission prompt does not look like a dead key.
+        // (Both at once would overlap on the 480-wide canvas.)
+        let footer = match self.pending {
+            Some(Pending::Export(_)) => "클립보드로 내보내는 중…".to_string(),
+            Some(Pending::Import) => "클립보드에서 가져오는 중…".to_string(),
+            None => "Z/Enter 선택 · X/Esc 돌아가기 · Delete 삭제 · T 기록 도구".to_string(),
+        };
+        let footer_style = if self.pending.is_some() {
+            TextStyle::small(theme::TEXT_ACCENT)
+        } else {
+            TextStyle::small(theme::TEXT_DISABLED)
+        };
+        gfx.text_aligned(&footer, 0.0, h - 15.0, w - 8.0, Align::Right, footer_style);
 
         match &self.popup {
             Popup::None => {}
@@ -411,7 +710,13 @@ impl Screen for SaveLoadScreen {
                 fill_rect(gfx.screen(), Color::new(0.0, 0.0, 0.0, 0.35));
                 choice.draw(ctx);
             }
-            Popup::Confirm { dialog, .. } => {
+            Popup::Tools { choice, .. } => {
+                fill_rect(gfx.screen(), Color::new(0.0, 0.0, 0.0, 0.35));
+                choice.draw(ctx);
+            }
+            Popup::Confirm { dialog, .. }
+            | Popup::Import { dialog, .. }
+            | Popup::ClearAll { dialog, .. } => {
                 fill_rect(gfx.screen(), Color::new(0.0, 0.0, 0.0, 0.35));
                 dialog.draw(ctx);
             }

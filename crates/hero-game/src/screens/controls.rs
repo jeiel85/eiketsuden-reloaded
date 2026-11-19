@@ -56,7 +56,11 @@ const COMMON: &[Row] = &[
     row("결정", "Z · Enter · Space / 클릭 · 탭"),
     row("취소 · 메뉴", "X · Esc · Backspace / 오른쪽 클릭"),
     row("목록 이동", "방향키 · WASD / 마우스 휠"),
-    row("기록 삭제", "Delete (불러오기 화면)"),
+    row("기록 삭제", "Delete (불러오기·기록하기 화면)"),
+    row(
+        "기록 도구 (내보내기·가져오기·모두 지우기)",
+        "T (불러오기·기록하기 화면)",
+    ),
 ];
 
 const BATTLE: &[Row] = &[
@@ -356,7 +360,7 @@ mod tests {
     use super::*;
 
     /// Every section has rows, every row names both an action and keys, and the keys the game
-    /// binds are in the list (F1, F5, F6, F9, F3, F11, Tab / Q / E, PageUp, Delete).
+    /// binds are in the list (F1, F5, F6, F9, F3, F11, Tab / Q / E, PageUp, Delete, T).
     #[test]
     fn the_list_covers_every_binding() {
         let sections = sections();
@@ -379,6 +383,7 @@ mod tests {
             "E",
             "PageUp",
             "Delete",
+            "T (불러오기",
             "Esc",
             "Backspace",
             "WASD",

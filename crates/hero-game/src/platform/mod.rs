@@ -21,9 +21,11 @@
 //!   base pack ([`DataRoot::memory_pack`]). An explicit `--data` / `EIKETSUDEN_DATA` wins over
 //!   it ([`explicit_data`]).
 //! * [`unix_now`] — wall clock time for save timestamps.
+//! * [`clipboard`] — the system clipboard, for carrying a save to another device.
 //! * [`storage`] — key/value persistence for saves and settings (files natively,
 //!   `localStorage` on the web).
 
+pub mod clipboard;
 pub mod memfs;
 pub mod storage;
 #[cfg(target_arch = "wasm32")]
